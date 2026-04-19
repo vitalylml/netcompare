@@ -2901,3 +2901,4 @@ onnx.Error = class extends Error {
 };
 
 export const ModelFactory = onnx.ModelFactory;
+export const Node = onnx.Node;

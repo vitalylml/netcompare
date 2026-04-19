@@ -1,39 +1,10 @@
-<div align="center">
-<img width="400px" height="100px" src="https://github.com/lutzroeder/netron/raw/main/.github/logo-light.svg#gh-light-mode-only">
-<img width="400px" height="100px" src="https://github.com/lutzroeder/netron/raw/main/.github/logo-dark.svg#gh-dark-mode-only">
-</div>
+# Netcompare
 
-Netron is a viewer for neural network, deep learning and machine learning models.
+Netcompare is an experimental viewer for neural network, deep learning, and machine learning models, built to compare two models side by side. It highlights structural differences using intuitive, human-readable color categories:
 
-Netron supports ONNX, TensorFlow Lite, PyTorch, torch.export, ExecuTorch, Core ML, Keras, Caffe, Darknet, TensorFlow.js, Safetensors and NumPy.
+- **Matched nodes:** Light Gray
+- **Modified nodes:** Light Yellow
+- **Added nodes:** Light Green
+- **Removed nodes:** Light Red
 
-Netron has experimental support for TorchScript, MLIR, TensorFlow, OpenVINO, RKNN, ncnn, MNN, PaddlePaddle, GGUF and scikit-learn.
-
-<p align='center'><a href='https://www.lutzroeder.com/ai'><img src='.github/screenshot.png' width='800'></a></p>
-
-## Install
-
-**Browser**: [**Start**](https://netron.app) the browser version.
-
-**macOS**: [**Download**](https://github.com/lutzroeder/netron/releases/latest) the `.dmg` file or run `brew install --cask netron`.
-
-**Linux**: [**Download**](https://github.com/lutzroeder/netron/releases/latest) the `.deb` or `.rpm` file.
-
-**Windows**: [**Download**](https://github.com/lutzroeder/netron/releases/latest) the `.exe` installer or run `winget install -s winget netron`.
-
-**Python**: `pip install netron`, then run `netron [FILE]` or `netron.start('[FILE]')`.
-
-## Models
-
-Sample model files to download or open using the browser version:
-
- * **ONNX**: [squeezenet](https://github.com/onnx/models/raw/main/validated/vision/classification/squeezenet/model/squeezenet1.0-3.onnx) [[open](https://netron.app?url=https://github.com/onnx/models/raw/main/validated/vision/classification/squeezenet/model/squeezenet1.0-3.onnx)]
- * **TorchScript**: [traced_online_pred_layer](https://github.com/ApolloAuto/apollo/raw/master/modules/prediction/data/traced_online_pred_layer.pt) [[open](https://netron.app?url=https://github.com/ApolloAuto/apollo/raw/master/modules/prediction/data/traced_online_pred_layer.pt)]
- * **TensorFlow Lite**: [yamnet](https://huggingface.co/thelou1s/yamnet/resolve/main/lite-model_yamnet_tflite_1.tflite) [[open](https://netron.app?url=https://huggingface.co/thelou1s/yamnet/blob/main/lite-model_yamnet_tflite_1.tflite)]
- * **TensorFlow**: [chessbot](https://github.com/srom/chessbot/raw/master/model/chessbot.pb) [[open](https://netron.app?url=https://github.com/srom/chessbot/raw/master/model/chessbot.pb)]
- * **Keras**: [mobilenet](https://github.com/aio-libs/aiohttp-demos/raw/master/demos/imagetagger/tests/data/mobilenet.h5) [[open](https://netron.app?url=https://github.com/aio-libs/aiohttp-demos/raw/master/demos/imagetagger/tests/data/mobilenet.h5)]
-
-* **MLIR**: [edge_detection](https://github.com/iree-org/iree/raw/main/tests/e2e/stablehlo_models/edge_detection.mlir) [[open](https://netron.app?url=https://github.com/iree-org/iree/blob/main/tests/e2e/stablehlo_models/edge_detection.mlir)]
-
- * **Core ML**: [exermote](https://github.com/Lausbert/Exermote/raw/master/ExermoteInference/ExermoteCoreML/ExermoteCoreML/Model/Exermote.mlmodel) [[open](https://netron.app?url=https://github.com/Lausbert/Exermote/raw/master/ExermoteInference/ExermoteCoreML/ExermoteCoreML/Model/Exermote.mlmodel)]
- * **Darknet**: [yolo](https://github.com/AlexeyAB/darknet/raw/master/cfg/yolo.cfg) [[open](https://netron.app?url=https://github.com/AlexeyAB/darknet/raw/master/cfg/yolo.cfg)]
+Netcompare requires that both models use the same framework (e.g., ONNX vs ONNX, Keras vs Keras) and that one model is a modification or evolution of the other. Comparing unrelated architectures is not supported.

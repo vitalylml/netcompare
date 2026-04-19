@@ -54,6 +54,23 @@
 .node-argument > text { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 9px; font-weight: normal; text-rendering: geometricPrecision; user-select: none; }
 .node-argument > rect { fill: transparent; }
 
+.node-default > path { fill: #E9ECEF; }
+.node-different > path { fill: #FFF3CD; }
+.node-added > path { fill: #D4EDDA; }
+.node-removed > path { fill: #F8D7DA; }
+
+.node-default > text { fill: #000; }
+.node-different > text { fill: #000; }
+.node-added > text { fill: #000; }
+.node-removed > text { fill: #000; }
+
+.node-default.node-match-highlight > path { fill: #CED4DA; }
+.node-different.node-match-highlight > path { fill: #D39E00; }
+
+.node-sync-halo { filter: drop-shadow(0 0 6px rgba(59,130,246,0.95)) drop-shadow(0 0 16px rgba(59,130,246,0.55)); }
+.node-added:hover > path { fill: #28A745; }
+.node-removed:hover > path { fill: #C82333; }
+
 .graph-item-input path { fill: #eee; }
 .graph-item-input:hover { cursor: pointer; }
 .graph-item-input:hover path { fill: #fff; }
@@ -66,9 +83,9 @@
 #arrowhead-hover { fill: rgba(220, 0, 0, 0.9); }
 #arrowhead-select { fill: rgba(220, 0, 0, 0.9); }
 
-.edge-paths { pointer-events: none; }
+.left-panel-edge-paths, .right-panel-edge-paths { pointer-events: none; }
 .edge-path { stroke: #000; stroke-width: 1px; fill: none; marker-end: url("#arrowhead"); }
-.edge-paths-hit-test { pointer-events: stroke; stroke-width: 0.5em; fill: none; stroke: #000; stroke-opacity: 0.001; }
+.left-panel-edge-paths-hit-test, .right-panel-edge-paths-hit-test { pointer-events: stroke; stroke-width: 0.5em; fill: none; stroke: #000; stroke-opacity: 0.001; }
 
 .select > .node.node-border { stroke: rgba(220, 0, 0, 0.9); stroke-width: 2px; }
 .select.edge-path { stroke: rgba(220, 0, 0, 0.9); stroke-width: 1px; marker-end: url("#arrowhead-select"); }

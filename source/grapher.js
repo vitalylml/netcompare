@@ -1,9 +1,10 @@
+import * as diffAnalyzer from './diff-analyzer.js';
 
 const grapher = {};
 
 grapher.Graph = class {
 
-    constructor(compound) {
+    constructor(compound, targetPanelId) {
         this._compound = compound;
         this._nodes = new Map();
         this._edges = new Map();
@@ -12,6 +13,7 @@ grapher.Graph = class {
         this._children = new Map();
         this._children.set('\x00', new Map());
         this._parent = new Map();
+        this._targetPanel = targetPanelId;
     }
 
     setNode(node) {
@@ -105,8 +107,6 @@ grapher.Graph = class {
 
     build(document) {
 
-        const origin = document.getElementById('origin');
-
         const createGroup = (name) => {
             const element = document.createElementNS('http://www.w3.org/2000/svg', 'g');
             element.setAttribute('id', name);
@@ -114,11 +114,12 @@ grapher.Graph = class {
             return element;
         };
 
-        const clusterGroup = createGroup('clusters');
-        const edgePathGroup = createGroup('edge-paths');
-        const edgePathHitTestGroup = createGroup('edge-paths-hit-test');
-        const edgeLabelGroup = createGroup('edge-labels');
-        const nodeGroup = createGroup('nodes');
+        const clusterGroup = createGroup(this._targetPanel + '-clusters');
+        const edgePathGroup = createGroup(this._targetPanel + '-edge-paths');
+        const edgePathHitTestGroup = createGroup(this._targetPanel + '-edge-paths-hit-test');
+        const edgeLabelGroup = createGroup(this._targetPanel + '-edge-labels');
+        const nodeGroup = createGroup(this._targetPanel + '-nodes');
+        const origin = document.getElementById(this._targetPanel + '-origin');
 
         const edgePathGroupDefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
         edgePathGroup.appendChild(edgePathGroupDefs);
@@ -329,8 +330,8 @@ grapher.Node = class {
         this._blocks = [];
     }
 
-    header() {
-        const block = new grapher.Node.Header();
+    header(nodeInfo) {
+        const block = new grapher.Node.Header(nodeInfo);
         this._blocks.push(block);
         return block;
     }
@@ -424,8 +425,9 @@ grapher.Node = class {
 
 grapher.Node.Header = class {
 
-    constructor() {
+    constructor(nodeInfo) {
         this._entries = [];
+        this._nodeInfo = nodeInfo;
     }
 
     add(id, classList, content, tooltip, handler) {
@@ -437,7 +439,7 @@ grapher.Node.Header = class {
     build(document, parent) {
         this._document = document;
         for (const entry of this._entries) {
-            entry.build(document, parent);
+            entry.build(document, parent, this._nodeInfo);
         }
         if (!this.first) {
             this.line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
@@ -531,7 +533,23 @@ grapher.Node.Header.Entry = class {
         }
     }
 
-    build(document, parent) {
+    _getClassStyle(nodeInfo) {
+        const status = nodeInfo.generalStatus;
+        if (status === diffAnalyzer.DiffStatus.ADDED) {
+            return 'node-added';
+        }
+        else if (status === diffAnalyzer.DiffStatus.REMOVED) {
+            return 'node-removed';
+        }
+        else if (status === diffAnalyzer.DiffStatus.SAME) {
+            return 'node-default';
+        }
+        else {
+            return 'node-different';
+        }
+    }
+
+    build(document, parent, nodeInfo) {
         this.element = document.createElementNS('http://www.w3.org/2000/svg', 'g');
         parent.appendChild(this.element);
         this.path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -546,6 +564,91 @@ grapher.Node.Header.Entry = class {
         if (this.id) {
             this.element.setAttribute('id', this.id);
         }
+        
+        if(nodeInfo) {
+            this.element.classList.add(this._getClassStyle(nodeInfo));
+            if (nodeInfo.nodeID !== null && nodeInfo.nodeID !== undefined) {
+                const NODE_MATCH_CLASS = 'node-match-highlight';
+                const nodeId = String(nodeInfo.nodeID);
+
+                this.element.dataset.nodeId = nodeId;
+
+                // Utils
+                const getPanel = (el) => el?.closest?.('.panel') || null;
+
+                const findMatches = (id, scope = document) =>
+                    scope.querySelectorAll(`[data-node-id='${CSS.escape(id)}']`);
+
+                const addMatchHighlight = () => {
+                    findMatches(nodeId).forEach((el) => el.classList.add(NODE_MATCH_CLASS));
+                };
+
+                const removeMatchHighlight = () => {
+                    findMatches(nodeId).forEach((el) => el.classList.remove(NODE_MATCH_CLASS));
+                };
+
+                // Hover: highlight all matched nodes
+                this.element.addEventListener('mouseenter', addMatchHighlight);
+                this.element.addEventListener('mouseleave', removeMatchHighlight);
+
+                // Click: align the other (slave) panel to the same node at the same relative position
+                this.element.addEventListener('click', (e) => {
+                    // Identify panels
+                    const masterPanel = getPanel(this.element);
+                    if (!masterPanel) return;
+
+                    const matchedNodes = Array.from(findMatches(nodeId));
+                    if (matchedNodes.length < 2) {
+                        // Not enough matches to sync (e.g., only one side present)
+                        return;
+                    }
+
+                    // Determine master/slave nodes based on which panel this.element is in
+                    let masterNode, slaveNode;
+                    if (masterPanel === getPanel(matchedNodes[0])) {
+                        masterNode = matchedNodes[0];
+                        slaveNode = matchedNodes[1];
+                    } else {
+                        masterNode = matchedNodes[1];
+                        slaveNode = matchedNodes[0];
+                    }
+
+                    const slavePanel = getPanel(slaveNode);
+                    if (!slavePanel) return;
+
+                    // Compute scroll delta so that slave node appears at the same relative
+                    // vertical and horizontal offset as the master node within their respective panel viewports.
+                    const masterNodeRect  = masterNode.getBoundingClientRect();
+                    const slaveNodeRect   = slaveNode.getBoundingClientRect();
+                    const masterPanelRect = masterPanel.getBoundingClientRect();
+                    const slavePanelRect  = slavePanel.getBoundingClientRect();
+
+                    // Relative positions inside their scroll containers (viewports)
+                    const masterRelTop  = masterNodeRect.top  - masterPanelRect.top;
+                    const slaveRelTop   = slaveNodeRect.top   - slavePanelRect.top;
+                    const masterRelLeft = masterNodeRect.left - masterPanelRect.left;
+                    const slaveRelLeft  = slaveNodeRect.left  - slavePanelRect.left;
+
+                    // Amount to move the slave panel so the slave node lines up with the master's relative offsets
+                    const deltaY = slaveRelTop  - masterRelTop;
+                    const deltaX = slaveRelLeft - masterRelLeft;
+
+                    const nextScrollTop  = Math.max(0, slavePanel.scrollTop  + deltaY);
+                    const nextScrollLeft = Math.max(0, slavePanel.scrollLeft + deltaX);
+
+                    // Respect reduced-motion preference
+                    const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+
+                    slavePanel.scrollTo({
+                        top: nextScrollTop,
+                        left: nextScrollLeft,
+                        behavior: prefersReducedMotion ? 'auto' : 'smooth'
+                    });
+
+                });
+            }
+        }
+
         if (this._events.click) {
             this.element.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -1052,5 +1155,6 @@ grapher.Edge.Path = class {
         return this._data;
     }
 };
+
 
 export const { Graph, Node, Edge, Argument } = grapher;

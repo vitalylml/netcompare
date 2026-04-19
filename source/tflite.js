@@ -543,3 +543,4 @@ tflite.Error = class extends Error {
 };
 
 export const ModelFactory = tflite.ModelFactory;
+export const Node = tflite.Node;

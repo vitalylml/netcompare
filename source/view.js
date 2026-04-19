@@ -1,17 +1,21 @@
 
 import * as base from './base.js';
 import * as grapher from './grapher.js';
+import * as diffAnalyzer from './diff-analyzer.js';
+import { metadata, metrics } from './metadata.js';
 
 const view = {};
 const markdown = {};
 const png = {};
-const metadata = {};
-const metrics = {};
+const doubleSidebar = {};
+
 
 view.View = class {
-
     constructor(host) {
         this._host = host;
+        this._modelFactoryService = new view.ModelFactoryService(this._host);
+        this._modelFactoryService.import();
+        this._worker = this._host.environment('measure') ? null : new view.Worker(this._host);
         this._defaultOptions = {
             weights: true,
             attributes: false,
@@ -20,27 +24,37 @@ view.View = class {
             mousewheel: 'scroll'
         };
         this._options = { ...this._defaultOptions };
-        this._events = {};
-        this._events.selectionchange = () => this._selectionChangeHandler();
-        this._model = null;
-        this._path = [];
-        this._selection = [];
+        this._panels = [
+            new view.Panel(this._host, this._modelFactoryService, this._worker, "left-panel"), 
+            new view.Panel(this._host, this._modelFactoryService, this._worker, "right-panel")];
         this._sidebar = new view.Sidebar(this._host);
+        this._differences = null;
         this._find = null;
-        this._modelFactoryService = new view.ModelFactoryService(this._host);
-        this._modelFactoryService.import();
-        this._worker = this._host.environment('serial') ? null : new view.Worker(this._host);
+        this._scrollSync = null;
+        this._scrollSyncEnabled = true;
+    }
+
+    _element(id) {
+        return this._host.document.getElementById(id);
+    }
+
+    get host() {
+        return this._host;
     }
 
     async start() {
+        await this._panels[0].start();
+        await this._panels[1].start();
         try {
             const zip = await import('./zip.js');
             await zip.Archive.import();
+
             await this._host.view(this);
             const options = this._host.get('options') || {};
             for (const [name, value] of Object.entries(options)) {
                 this._options[name] = value;
             }
+
             this._element('sidebar-model-button').addEventListener('click', () => {
                 this.showModelProperties();
             });
@@ -53,6 +67,7 @@ view.View = class {
             this._element('zoom-out-button').addEventListener('click', () => {
                 this.zoomOut();
             });
+            // Button back is hidden
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
                 await this.popTarget();
             });
@@ -61,32 +76,6 @@ view.View = class {
                     e.preventDefault();
                 }
             }, { passive: false });
-            this._host.document.addEventListener('keydown', (e) => {
-                if (this._target && !e.metaKey && !e.ctrlKey) {
-                    this._target.select(null);
-                }
-            });
-            this._host.document.addEventListener('copy', (e) => {
-                const selection = this._host.document.getSelection();
-                if (!selection || selection.toString().trim() === '') {
-                    if (this._target && this._target.selection.size > 0) {
-                        const names = [];
-                        for (const element of this._target.selection) {
-                            if (element.value && element.value.name) {
-                                names.push(element.value.name);
-                            }
-                        }
-                        if (names.length > 0) {
-                            e.clipboardData.setData('text/plain', names.join('\n'));
-                            e.preventDefault();
-                        }
-                    }
-                }
-            });
-            if (this._host.type === 'Electron') {
-                this._host.update({ 'copy.enabled': false });
-                this._host.document.addEventListener('selectionchange', this._events.selectionchange);
-            }
             const platform = this._host.environment('platform');
             this._menu = new view.Menu(this._host);
             this._menu.add({
@@ -101,12 +90,12 @@ view.View = class {
                 const menu = this._element('menu');
                 const button = this._element('menu-button');
                 this._menu.attach(menu, button);
-                const file = this._menu.group('&File');
-                file.add({
-                    label: '&Open...',
-                    accelerator: 'CmdOrCtrl+O',
-                    execute: async () => await this._host.execute('open')
-                });
+                // const file = this._menu.group('&File');
+                // file.add({
+                //     label: '&Open...',
+                //     accelerator: 'CmdOrCtrl+O',
+                //     execute: async () => await this._host.execute('open')
+                // });
                 if (this._host.type === 'Electron') {
                     this._recents = file.group('Open &Recent');
                     file.add({
@@ -126,56 +115,61 @@ view.View = class {
                         execute: async () => await this._host.execute('quit'),
                     });
                 } else {
-                    file.add({
-                        label: 'Export as &PNG',
-                        accelerator: 'CmdOrCtrl+Shift+E',
-                        execute: async () => await this.export(`${this._host.document.title}.png`),
-                        enabled: () => this.activeTarget
-                    });
-                    file.add({
-                        label: 'Export as &SVG',
-                        accelerator: 'CmdOrCtrl+Alt+E',
-                        execute: async () => await this.export(`${this._host.document.title}.svg`),
-                        enabled: () => this.activeTarget
-                    });
+                    // file.add({
+                    //     label: 'Export as &PNG',
+                    //     accelerator: 'CmdOrCtrl+Shift+E',
+                    //     execute: async () => await this.export(`${this._host.document.title}.png`),
+                    //     enabled: () => this.activeTarget
+                    // });
+                    // file.add({
+                    //     label: 'Export as &SVG',
+                    //     accelerator: 'CmdOrCtrl+Alt+E',
+                    //     execute: async () => await this.export(`${this._host.document.title}.svg`),
+                    //     enabled: () => this.activeTarget
+                    // });
                 }
                 const edit = this._menu.group('&Edit');
                 edit.add({
                     label: '&Find...',
                     accelerator: 'CmdOrCtrl+F',
                     execute: () => this.find(),
-                    enabled: () => this.activeTarget
+                    enabled: () => !this._arePanelsEmpty()
                 });
                 const view = this._menu.group('&View');
                 view.add({
                     label: () => this.options.attributes ? 'Hide &Attributes' : 'Show &Attributes',
                     accelerator: 'CmdOrCtrl+D',
                     execute: () => this.toggle('attributes'),
-                    enabled: () => this.activeTarget
+                    enabled: () => !this._arePanelsEmpty()
                 });
                 view.add({
                     label: () => this.options.weights ? 'Hide &Weights' : 'Show &Weights',
                     accelerator: 'CmdOrCtrl+I',
                     execute: () => this.toggle('weights'),
-                    enabled: () => this.activeTarget
+                    enabled: () => !this._arePanelsEmpty()
                 });
                 view.add({
                     label: () => this.options.names ? 'Hide &Names' : 'Show &Names',
                     accelerator: 'CmdOrCtrl+U',
                     execute: () => this.toggle('names'),
-                    enabled: () => this.activeTarget
+                    enabled: () => !this._arePanelsEmpty()
                 });
-                view.add({
-                    label: () => this.options.direction === 'vertical' ? 'Show &Horizontal' : 'Show &Vertical',
-                    accelerator: 'CmdOrCtrl+K',
-                    execute: () => this.toggle('direction'),
-                    enabled: () => this.activeTarget
-                });
+                // view.add({
+                //     label: () => this.options.direction === 'vertical' ? 'Show &Horizontal' : 'Show &Vertical',
+                //     accelerator: 'CmdOrCtrl+K',
+                //     execute: () => this.toggle('direction'),
+                //     enabled: () => !this._isEmptyPanels()
+                // });
                 view.add({
                     label: () => this.options.mousewheel === 'scroll' ? '&Mouse Wheel: Zoom' : '&Mouse Wheel: Scroll',
                     accelerator: 'CmdOrCtrl+M',
                     execute: () => this.toggle('mousewheel'),
-                    enabled: () => this.activeTarget
+                    enabled: () => !this._arePanelsEmpty()
+                });
+                view.add({
+                    label: () => this._scrollSyncEnabled ? 'Disable &Auto-Scroll Sync' : 'Enable &Auto-Scroll Sync',
+                    execute: () => this.toggleScrollSync(),
+                    enabled: () => !this._panels[0].isPanelEmpty() && !this._panels[1].isPanelEmpty()
                 });
                 view.add({});
                 if (this._host.type === 'Electron') {
@@ -191,26 +185,26 @@ view.View = class {
                     label: 'Zoom &In',
                     accelerator: 'Shift+Up',
                     execute: () => this.zoomIn(),
-                    enabled: () => this.activeTarget && this.target
+                    enabled: () => !this._arePanelsEmpty()
                 });
                 view.add({
                     label: 'Zoom &Out',
                     accelerator: 'Shift+Down',
                     execute: () => this.zoomOut(),
-                    enabled: () => this.activeTarget && this.target
+                    enabled: () => !this._arePanelsEmpty()
                 });
                 view.add({
                     label: 'Actual &Size',
                     accelerator: 'Shift+Backspace',
                     execute: () => this.resetZoom(),
-                    enabled: () => this.activeTarget && this.target
+                    enabled: () => !this._arePanelsEmpty()
                 });
                 view.add({});
                 view.add({
                     label: '&Properties...',
                     accelerator: 'CmdOrCtrl+Enter',
                     execute: () => this.showTargetProperties(),
-                    enabled: () => this.activeTarget
+                    enabled: () => !this._arePanelsEmpty()
                 });
                 if (this._host.type === 'Electron' && !this._host.environment('packaged')) {
                     view.add({});
@@ -230,13 +224,14 @@ view.View = class {
                     execute: async () => await this._host.execute('about')
                 });
             }
-            const navigator = this._element('toolbar-navigator');
-            this._select = new view.TargetSelector(this, navigator);
-            this._select.on('change', (sender, target) => this._updateActiveTarget([target]));
             await this._host.start();
         } catch (error) {
             this.error(error, null, null);
         }
+    }
+
+    setDifferences(differences) {
+        this._differences = differences;
     }
 
     dispose() {
@@ -245,13 +240,13 @@ view.View = class {
         }
     }
 
-    get host() {
-        return this._host;
+    _arePanelsEmpty() {
+        return this._panels.every((panel) => panel.model === null);
     }
 
-    show(page) {
+    show(page, modelId) {
         if (!page) {
-            page = (!this._model && !this.activeTarget) ? 'welcome' : 'default';
+            page = this._arePanelsEmpty() ? 'welcome' : 'default';
         }
         this._host.event('screen_view', {
             screen_name: page,
@@ -264,85 +259,167 @@ view.View = class {
         }
         this._host.document.body.classList.remove(...Array.from(this._host.document.body.classList).filter((_) => _ !== 'active'));
         this._host.document.body.classList.add(...page.split(' '));
-        if (this._target && page === 'default') {
-            this._target.register();
-        } else if (this._target) {
-            this._target.unregister();
-        }
         if (page === 'welcome') {
-            const element = this._element('open-file-button');
+            const element = this._element('compare-models-button');
             if (element) {
                 element.focus();
+            }
+        }
+        else
+        {
+            if(modelId === 'model-left') {
+                this._panels[0].show(page);
+            }
+            else if(modelId === 'model-right') {
+                this._panels[1].show(page);
             }
         }
         this._page = page;
     }
 
-    progress(percent) {
-        const bar = this._element('progress-bar');
-        if (bar) {
-            bar.style.width = `${percent}%`;
+    accept(file, size) {
+        return this._modelFactoryService.accept(file, size);
+    }
+
+    async open(context, modelId) {
+        if(modelId === 'model-left') {
+            return await this._panels[0].open(context);
+        }
+        else if(modelId === 'model-right') {
+            return await this._panels[1].open(context);
         }
     }
 
-    find() {
-        if (this._target && this._sidebar.identifier !== 'find') {
-            this._target.select(null);
-            const sidebar = new view.FindSidebar(this, this._find, this.activeTarget, this.activeSignature);
-            sidebar.on('state-changed', (sender, state) => {
-                this._find = state;
-            });
-            sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value]));
-            });
-            sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
-            });
-            sidebar.on('blur', (sender, value) => {
-                this._target.blur([value]);
-            });
-            sidebar.on('activate', (sender, value) => {
-                this._sidebar.close();
-                this._target.scrollTo(this._target.activate(value));
-            });
-            this._sidebar.open(sidebar, 'Find');
+    async render(newModel, modelId, nodeInfos) {
+        if(modelId === 'model-left') {
+            return await this._panels[0].updateModel(newModel, nodeInfos);
+        }
+        else if(modelId === 'model-right') {
+            return await this._panels[1].updateModel(newModel, nodeInfos);
         }
     }
 
-    get model() {
-        return this._model;
+    updatePanelVisibility() {
+        const target   = document.getElementById('target');
+        const el0      = document.getElementById('left-panel');
+        const el1      = document.getElementById('right-panel');
+        const has0     = !this._panels[0].isPanelEmpty();
+        const has1     = !this._panels[1].isPanelEmpty();
+        const isSingle = has0 !== has1; // exactly one panel has a model
+        target.classList.toggle('single-model', isSingle);
+        if (el0) el0.classList.toggle('panel-hidden', isSingle && !has0);
+        if (el1) el1.classList.toggle('panel-hidden', isSingle && !has1);
     }
 
-    set model(value) {
-        this._model = value;
-    }
-
-    get options() {
-        return this._options;
-    }
-
-    get target() {
-        return this._target;
-    }
-
-    set target(value) {
-        if (this._target !== value) {
-            if (this._target) {
-                this._target.off('selectionchange', this._events.selectionchange);
-                this._target.unregister();
-            }
-            const enabled = value ? true : false;
-            this._host.update({
-                'zoom-reset.enabled': enabled,
-                'zoom-in.enabled': enabled,
-                'zoom-out.enabled': enabled
-            });
-            this._target = value;
-            if (this._target) {
-                this._target.on('selectionchange', this._events.selectionchange);
-                this._target.register();
-            }
+    enableScrollSync() {
+        if (this._scrollSync) {
+            this._scrollSync.destroy();
+            this._scrollSync = null;
         }
+        if (!this._scrollSyncEnabled) return;
+        const panelLeft  = document.querySelector('#left-panel');
+        const panelRight = document.querySelector('#right-panel');
+        if (!panelLeft || !panelRight) return;
+        this._scrollSync = createScrollSync({ panelA: panelLeft, panelB: panelRight });
+    }
+
+    toggleScrollSync() {
+        this._scrollSyncEnabled = !this._scrollSyncEnabled;
+        if (this._scrollSyncEnabled) {
+            this.enableScrollSync();
+        } else if (this._scrollSync) {
+            this._scrollSync.destroy();
+            this._scrollSync = null;
+        }
+    }
+
+    async attach(context, modelId) {
+        if(modelId === 'model-left') {
+            return await this._panels[0].attach(context);
+        }
+        else if(modelId === 'model-right') {
+            return await this._panels[1].attach(context);
+        }
+        return false;
+    }
+
+    exception(error, fatal) {
+        if (error && !error.context && this._model && this._model.identifier) {
+            error.context = this._model.identifier;
+        }
+        this._host.exception(error, fatal);
+    }
+
+    async error(error, name, screen) {
+        if (this._sidebar) {
+            this._sidebar.close();
+        }
+        this.exception(error, false);
+        const repository = this._host.environment('repository');
+        const knowns = [
+            { message: /^Invalid value identifier/, issue: '540' },
+            { message: /^Cannot read property/, issue: '647' },
+            { message: /^Duplicate value /, issue: '1364' },
+            { message: /^EPERM: operation not permitted/, issue: '551' },
+            { message: /^EACCES: permission denied/, issue: '504' },
+            { message: /^Offset is outside the bounds of the DataView/, issue: '563' },
+            { message: /^Invalid string length/, issue: '648' },
+            { message: /^Unknown function /, issue: '546' },
+            { message: /^Unsupported file content/, issue: '550' },
+            { message: /^Unsupported Protocol Buffers content/, issue: '593' },
+            { message: /^Unsupported Protocol Buffers text content/, issue: '594' },
+            { message: /^Unsupported JSON content/, issue: '595' },
+            { message: /^Unknown type name '__torch__\./, issue: '969' },
+            { name: 'Error loading ONNX model.', message: /^File format is not onnx\.ModelProto \(Unexpected end of file\)\./, issue: '1155' },
+            { name: 'Error loading ONNX model.', message: /^File format is not onnx\.ModelProto \(Cannot read properties of undefined \(reading 'ModelProto'\)\)\./, issue: '1156' },
+            { name: 'Error loading ONNX model.', message: /^File format is not onnx\.ModelProto/, issue: '549' }
+        ];
+        const known = knowns.find((known) => (!known.name || known.name === error.name) && error.message.match(known.message));
+        const url = known && known.issue ? `${repository}/issues/${known.issue}` : `${repository}/issues`;
+        const message = error.message;
+        name = name || error.name;
+        const report = !message.startsWith('Invalid file content.') && this.host.environment('packaged');
+        await this._host.message(message, true, report ? 'Report' : 'OK');
+        if (report) {
+            this._host.openURL(url);
+        }
+        this.show(screen, "model-left");
+        this.show(screen, "model-right");
+    }
+
+    getModel(modelId) {
+        if(modelId === 'model-left') {
+            return this._panels[0].model;
+        }
+        else if(modelId === 'model-right') {
+            return this._panels[1].model;
+        }
+        return null;
+    }
+
+    getPanel(panelId) {
+        if(panelId === 'left-panel') {
+            return this._panels[0];
+        }
+        else if(panelId === 'right-panel') {
+            return this._panels[1];
+        }
+        return null;
+    }
+
+    zoomIn() {
+        this._panels[0].zoomIn();
+        this._panels[1].zoomIn();
+    }
+
+    zoomOut() {
+        this._panels[0].zoomOut();
+        this._panels[1].zoomOut();
+    }
+
+    resetZoom() {
+        this._panels[0].resetZoom();
+        this._panels[1].resetZoom();
     }
 
     toggle(name) {
@@ -376,6 +453,375 @@ view.View = class {
         }
     }
 
+    async _reload() {
+        this.show('welcome spinner');
+        for (const panel of this._panels) {
+            await panel._reload();
+        }
+        this.show(null);
+    }
+
+    get options() {
+        return this._options;
+    }
+
+    about() {
+        this._host.document.getElementById('version').innerText = this._host.version;
+        const handler = () => {
+            this._host.window.removeEventListener('keydown', handler);
+            this._host.document.body.removeEventListener('click', handler);
+            this._host.document.body.classList.remove('about');
+        };
+        this._host.window.addEventListener('keydown', handler);
+        this._host.document.body.addEventListener('click', handler);
+        this._host.document.body.classList.add('about');
+    }
+
+    showModelProperties() {
+        if (this._arePanelsEmpty()) {
+            return;
+        }
+        try {
+            let sidebar = null
+            if( !this._panels[0].isPanelEmpty() && !this._panels[1].isPanelEmpty() ) {
+                sidebar = new doubleSidebar.DoubleModelSidebar(this, 
+                    this._panels[0].model, 
+                    this._panels[1].model);
+            }
+            else if( !this._panels[0].isPanelEmpty() ) {
+                sidebar = new view.ModelSidebar(this, this._panels[0].model);
+            }
+            else if( !this._panels[1].isPanelEmpty() ) {
+                sidebar = new view.ModelSidebar(this, this._panels[1].model);
+            }
+            this._sidebar.open(sidebar, 'Model Properties');
+        } catch (error) {
+            this.error(error, 'Error showing model properties.', null);
+        }
+    }
+
+    showTargetProperties() {
+        if (this._sidebar.identifier === 'target') {
+            this.showModelProperties();
+            return;
+        }
+        if (this._arePanelsEmpty()) {
+            return;
+        }
+        try {
+            let sidebar = null;
+
+            if( !this._panels[0].isPanelEmpty() && !this._panels[1].isPanelEmpty() ) {
+                sidebar = sidebar = new doubleSidebar.DoubleTargetSidebar(this, 
+                    this._panels[0].activeTarget, this._panels[0].activeSignature,
+                    this._panels[1].activeTarget, this._panels[1].activeSignature,
+                    this._panels[0].model, this._panels[1].model);
+            }
+            else if( !this._panels[0].isPanelEmpty() ) {
+                sidebar = new view.TargetSidebar(this, 
+                    this._panels[0].activeTarget, 
+                    this._panels[0].activeSignature,
+                    this._panels[0].model);
+            }
+            else if( !this._panels[1].isPanelEmpty() ) {
+                sidebar = new view.TargetSidebar(this, 
+                    this._panels[1].activeTarget, 
+                    this._panels[1].activeSignature,
+                    this._panels[1].model);
+            }
+            for (const panel in this._panels.values()) {
+                if (!panel.isPanelEmpty()) {
+                    // TODO: Documentation side bar for both target
+                    // sidebar.on('show-definition', async (/* sender, e */) => {
+                    //     await this.showDefinition(panel.target);
+                    // });
+                    panel.setupSidebarEventLisnteners(sidebar);
+                }
+            }
+            let title = null;
+            const type = target.type || 'graph';
+            switch (type) {
+                case 'graph':
+                    title = 'Graph Properties';
+                    break;
+                case 'function':
+                    title = 'Function Properties';
+                    break;
+                case 'weights':
+                    title = 'Weights Properties';
+                    break;
+                default:
+                    throw new view.Error(`Unsupported graph type '${type}'.`);
+            }
+            this._sidebar.open(sidebar, title);
+        } catch (error) {
+            this.error(error, 'Error showing target properties.', null);
+        }
+    }
+
+    showNodeProperties(node, panelId) {
+        let nodeID = null;
+        if(panelId === 'left-panel') {
+            nodeID = this._differences.model1NodeInfos.getNodeInfo(node).nodeID;
+        }
+        else if(panelId === 'right-panel') {
+            nodeID = this._differences.model2NodeInfos.getNodeInfo(node).nodeID;
+        } else {
+            return;
+        }
+
+        try {
+            if (this._menu) {
+                this._menu.close();
+            }
+            let sidebar = null;
+            if(nodeID) {
+                const nodeDiffs = this._differences.nodeDiffs(nodeID);
+                sidebar = new doubleSidebar.DoubleNodeSidebar(this, nodeDiffs);
+            }
+            else {
+                sidebar = new view.NodeSidebar(this, node, this.getPanel(panelId).model);
+            }
+
+            for (const panel of this._panels.values()) {
+                if (!panel.isPanelEmpty()) {
+                    // TODO: Documentation side bar for both nodes
+                    // sidebar.on('show-definition', async (/* sender, e */) => {
+                    //     await this.showDefinition(node.type);
+                    // });
+                    panel.setupSidebarEventLisnteners(sidebar);
+                }
+            }
+            this._sidebar.open(sidebar, 'Node Properties');
+        } catch (error) {
+            this.error(error, 'Error showing node properties.', null);
+        }
+    }
+
+    showConnectionProperties(value, from, to, panelId) {
+        try {
+            if (this._menu) {
+                this._menu.close();
+            }
+            const model = this.getPanel(panelId).model;
+            const sidebar = new view.ConnectionSidebar(this, value, from, to, model);
+            
+            for (const panel of this._panels.values()) {
+                if (!panel.isPanelEmpty()) {
+                    panel.setupSidebarEventLisnteners(sidebar);
+                }
+            }
+
+            this._sidebar.push(sidebar, 'Connection Properties');
+        } catch (error) {
+            this.error(error, 'Error showing connection properties.', null);
+        }
+    }
+
+    showTensorProperties(value, panelId) {
+        try {
+            if (this._menu) {
+                this._menu.close();
+            }
+
+            const model = this.getPanel(panelId).model;
+            const sidebar = new view.TensorSidebar(this, value, model);
+            
+            for (const panel of this._panels.values()) {
+                if (!panel.isPanelEmpty()) {
+                    panel.setupSidebarEventLisnteners(sidebar);
+                }
+            }
+
+            this._sidebar.push(sidebar, 'Tensor Properties');
+        } catch (error) {
+            this.error(error, 'Error showing tensor properties.', null);
+        }
+    }
+
+    async showDefinition(type) {
+        if (type && (type.description || type.inputs || type.outputs || type.attributes)) {
+            if (type.nodes && type.nodes.length > 0) {
+                await this.pushTarget(type);
+            }
+            if (type.type !== 'weights') {
+                const sidebar = new view.DocumentationSidebar(this, type);
+                sidebar.on('navigate', (sender, e) => {
+                    this._host.openURL(e.link);
+                });
+                const title = type.type === 'function' ? 'Function Documentation' : 'Documentation';
+                this._sidebar.push(sidebar, title);
+            }
+        }
+    }
+
+    find() {
+        if (this._sidebar.identifier === 'find') return;
+        const p0 = this._panels[0];
+        const p1 = this._panels[1];
+        const has0 = !p0.isPanelEmpty();
+        const has1 = !p1.isPanelEmpty();
+        if (!has0 && !has1) return;
+
+        if (has0 && p0.target) p0.target.select(null);
+        if (has1 && p1.target) p1.target.select(null);
+
+        let sidebar;
+        if (has0 && has1) {
+            sidebar = new view.DoubleFindSidebar(this, this._find,
+                p0.activeTarget, p0.activeSignature,
+                p1.activeTarget, p1.activeSignature,
+                this._differences?.model1NodeInfos ?? null,
+                this._differences?.model2NodeInfos ?? null);
+            sidebar.on('state-changed', (sender, state) => { this._find = state; });
+            sidebar.on('select', (sender, { panelIdx, value }) => {
+                const t = this._panels[panelIdx].target;
+                if (t) t.scrollTo(t.select([value]));
+            });
+            sidebar.on('focus', (sender, { panelIdx, value }) => {
+                const t = this._panels[panelIdx].target;
+                if (t) t.focus([value]);
+            });
+            sidebar.on('blur', (sender, { panelIdx, value }) => {
+                const t = this._panels[panelIdx].target;
+                if (t) t.blur([value]);
+            });
+            sidebar.on('activate', (sender, { panelIdx, value }) => {
+                this._sidebar.close();
+                const t = this._panels[panelIdx].target;
+                if (t) t.scrollTo(t.activate(value));
+            });
+        } else {
+            const panel = has0 ? p0 : p1;
+            sidebar = new view.FindSidebar(this, this._find, panel.activeTarget, panel.activeSignature);
+            sidebar.on('state-changed', (sender, state) => { this._find = state; });
+            sidebar.on('select', (sender, value) => {
+                if (panel.target) panel.target.scrollTo(panel.target.select([value]));
+            });
+            sidebar.on('focus', (sender, value) => {
+                if (panel.target) panel.target.focus([value]);
+            });
+            sidebar.on('blur', (sender, value) => {
+                if (panel.target) panel.target.blur([value]);
+            });
+            sidebar.on('activate', (sender, value) => {
+                this._sidebar.close();
+                if (panel.target) panel.target.scrollTo(panel.target.activate(value));
+            });
+        }
+        this._sidebar.open(sidebar, 'Find');
+    }
+}
+
+
+view.Panel = class {
+
+    constructor(host, modelFactory, worker, panelId) {
+        this._host = host;
+        this._model = null;
+        this._path = []; // [0] target - Graph, [1] singature - null
+        this._selection = [];
+        this._modelFactoryService = modelFactory;
+        this._worker = worker;
+        this._panelId = panelId;
+        this._events = {};
+        this._events.selectionchange = () => this._selectionChangeHandler();
+    }
+
+    async start() {
+        try {
+            // TODO: Target selector for both panels
+            const navigator = this._element('toolbar-navigator');
+            this._select = new view.TargetSelector(this, navigator);
+            // this._select.on('change', (sender, target) => this._updateActiveTarget([target]));
+            
+            if (this._host.type === 'Electron') {
+                this._host.update({ 'copy.enabled': false });
+                this._host.document.addEventListener('selectionchange', this._events.selectionchange);
+            }
+            this._host.document.addEventListener('keydown', (e) => {
+                if (this._target && !e.metaKey && !e.ctrlKey) {
+                    this._target.select(null);
+                }
+            });
+            this._host.document.addEventListener('copy', (e) => {
+                const selection = this._host.document.getSelection();
+                if (!selection || selection.toString().trim() === '') {
+                    if (this._target && this._target.selection.size > 0) {
+                        const names = [];
+                        for (const element of this._target.selection) {
+                            if (element.value && element.value.name) {
+                                names.push(element.value.name);
+                            }
+                        }
+                        if (names.length > 0) {
+                            e.clipboardData.setData('text/plain', names.join('\n'));
+                            e.preventDefault();
+                        }
+                    }
+                }
+            });
+        } catch (error) {
+            this.error(error, null, null);
+        }
+    }
+
+    get host() {
+        return this._host;
+    }
+
+    show(page) {
+        if (this._target && page === 'default') {
+            this._target.register();
+        } else if (this._target) {
+            this._target.unregister();
+        }
+    }
+
+    progress(percent) {
+        const bar = this._element('progress-bar');
+        if (bar) {
+            bar.style.width = `${percent}%`;
+        }
+    }
+
+    get model() {
+        return this._model;
+    }
+
+    set model(value) {
+        this._model = value;
+    }
+
+    // Options from View
+    get options() {
+        return this._host._view.options;
+    }
+
+    get target() {
+        return this._target;
+    }
+
+    set target(value) {
+        if (this._target !== value) {
+            if (this._target) {
+                this._target.off('selectionchange', this._events.selectionchange);
+                this._target.unregister();
+            }
+            const enabled = value ? true : false;
+            this._host.update({
+                'zoom-reset.enabled': enabled,
+                'zoom-in.enabled': enabled,
+                'zoom-out.enabled': enabled
+            });
+            this._target = value;
+            if (this._target) {
+                this._target.on('selectionchange', this._events.selectionchange);
+                this._target.register();
+            }
+        }
+    }
+
     recents(recents) {
         if (this._recents) {
             this._recents.clear();
@@ -390,10 +836,9 @@ view.View = class {
         }
     }
 
-    _reload() {
-        this.show('welcome spinner');
+    async _reload() {
         if (this._model && this._path.length > 0) {
-            this._updateTarget(this._model, this._path).catch((error) => {
+            await this._updateTarget(this._model, this._path, this._nodeInfos).catch((error) => {
                 if (error) {
                     this.error(error, 'Graph update failed.', 'welcome');
                 }
@@ -433,54 +878,17 @@ view.View = class {
     }
 
     async error(error, name, screen) {
-        if (this._sidebar) {
-            this._sidebar.close();
-        }
-        this.exception(error, false);
-        const repository = this._host.environment('repository');
-        const knowns = [
-            { message: /^Invalid value identifier/, issue: '540' },
-            { message: /^Cannot read property/, issue: '647' },
-            { message: /^Duplicate value /, issue: '1364' },
-            { message: /^EPERM: operation not permitted/, issue: '551' },
-            { message: /^EACCES: permission denied/, issue: '504' },
-            { message: /^Offset is outside the bounds of the DataView/, issue: '563' },
-            { message: /^Invalid string length/, issue: '648' },
-            { message: /^Unknown function /, issue: '546' },
-            { message: /^Unsupported file content/, issue: '550' },
-            { message: /^Unsupported Protocol Buffers content/, issue: '593' },
-            { message: /^Unsupported Protocol Buffers text content/, issue: '594' },
-            { message: /^Unsupported JSON content/, issue: '595' },
-            { message: /^Unknown type name '__torch__\./, issue: '969' },
-            { name: 'Error loading ONNX model.', message: /^File format is not onnx\.ModelProto \(Unexpected end of file\)\./, issue: '1155' },
-            { name: 'Error loading ONNX model.', message: /^File format is not onnx\.ModelProto \(Cannot read properties of undefined \(reading 'ModelProto'\)\)\./, issue: '1156' },
-            { name: 'Error loading ONNX model.', message: /^File format is not onnx\.ModelProto/, issue: '549' }
-        ];
-        const known = knowns.find((known) => (!known.name || known.name === error.name) && error.message.match(known.message));
-        const url = known && known.issue ? `${repository}/issues/${known.issue}` : `${repository}/issues`;
-        const message = error.message;
-        name = name || error.name;
-        const report = !message.startsWith('Invalid file content.') && this.host.environment('packaged');
-        await this._host.message(message, true, report ? 'Report' : 'OK');
-        if (report) {
-            this._host.openURL(url);
-        }
-        this.show(screen);
-    }
-
-    accept(file, size) {
-        return this._modelFactoryService.accept(file, size);
+        this._host._view.error(error, name, screen);
     }
 
     async open(context) {
-        this._sidebar.close();
-        await this._timeout(2);
         try {
             const model = await this._modelFactoryService.open(context);
             const format = [];
             if (model.format) {
                 format.push(model.format);
             }
+            // TODO: Host event 'model_open'
             if (model.producer) {
                 format.push(`(${model.producer})`);
             }
@@ -490,7 +898,16 @@ view.View = class {
                     model_producer: model.producer || ''
                 });
             }
-            await this._timeout(20);
+            return model;
+        } catch (error) {
+            error.context = !error.context && context && context.identifier ? context.identifier : error.context || '';
+            throw error;
+        }
+    }
+
+    async updateModel(model, nodeInfos) {
+        await this._timeout(2);
+        try {
             const path = [];
             const modules = Array.isArray(model.functions) ? model.modules.concat(model.functions) : model.modules;
             let target = modules.length > 0 ? modules[0] : null;
@@ -504,9 +921,8 @@ view.View = class {
                 const signature = Array.isArray(target.signatures) && target.signatures.length > 0 ? target.signatures[0] : null;
                 path.push({ target, signature });
             }
-            return await this._updateTarget(model, path);
+            return await this._updateTarget(model, path, nodeInfos);
         } catch (error) {
-            error.context = !error.context && context && context.identifier ? context.identifier : error.context || '';
             throw error;
         }
     }
@@ -523,11 +939,9 @@ view.View = class {
     }
 
     async _updateActiveTarget(stack) {
-        this._sidebar.close();
         if (this._model) {
-            this.show('welcome spinner');
             try {
-                await this._updateTarget(this._model, stack);
+                await this._updateTarget(this._model, stack, this._nodeInfos);
             } catch (error) {
                 if (error) {
                     this.error(error, 'Graph update failed.', 'welcome');
@@ -550,28 +964,29 @@ view.View = class {
         return null;
     }
 
-    async _updateTarget(model, path) {
+    async _updateTarget(model, path, nodeInfos) {
         const lastModel = this._model;
         const lastPath = this._path;
+        const lastNodeInfos = this._nodeInfos;
         try {
-            await this._updatePath(model, path);
+            await this._updatePath(model, path, nodeInfos);
             return this._model;
         } catch (error) {
-            await this._updatePath(lastModel, lastPath);
+            await this._updatePath(lastModel, lastPath, lastNodeInfos);
             throw error;
         }
     }
 
-    async _updatePath(model, stack) {
+    async _updatePath(model, stack, nodeInfos) {
         this.model = model;
         this._path = stack;
-        const status = await this.render(this.activeTarget, this.activeSignature);
+        this._nodeInfos = nodeInfos;
+        const status = await this.render(this.activeTarget, this.activeSignature, nodeInfos);
         if (status === 'cancel') {
             this.model = null;
             this._path = [];
-            this._activeTarget = null;
+            // this._activeTarget = null;
         }
-        this.show(null);
         const path = this._element('toolbar-path');
         const back = this._element('toolbar-path-back-button');
         while (path.children.length > 1) {
@@ -598,9 +1013,9 @@ view.View = class {
                     element.addEventListener('click', async () => {
                         if (i > 0) {
                             this._path = this._path.slice(i);
-                            await this._updateTarget(this._model, this._path);
+                            await this._updateTarget(this._model, this._path, this._nodeInfos);
                         } else {
-                            await this.showTargetProperties(target);
+                            await this.showTargetProperties();
                         }
                     });
                     let name = '';
@@ -641,28 +1056,28 @@ view.View = class {
 
     async pushTarget(graph, context) {
         if (graph && graph !== this.activeTarget && Array.isArray(graph.nodes)) {
-            this._sidebar.close();
+            // this._sidebar.close();
             if (context && this._path.length > 0) {
                 this._path[0].state = { context, zoom: this._target.zoom };
             }
             const signature = Array.isArray(graph.signatures) && graph.signatures.length > 0 ? graph.signatures[0] : null;
             const entry = { target: graph, signature };
             const stack = [entry].concat(this._path);
-            await this._updateTarget(this._model, stack);
+            await this._updateTarget(this._model, stack, this._nodeInfos);
         }
     }
 
     async popTarget() {
         if (this._path.length > 1) {
-            this._sidebar.close();
-            return await this._updateTarget(this._model, this._path.slice(1));
+            // this._sidebar.close();
+            return await this._updateTarget(this._model, this._path.slice(1), this._nodeInfos);
         }
         return null;
     }
 
-    async render(target, signature) {
+    async render(target, signature, nodeInfos) {
         this.target = null;
-        const element = this._element('target');
+        const element = this._element(this._panelId);
         while (element.lastChild) {
             element.removeChild(element.lastChild);
         }
@@ -676,8 +1091,8 @@ view.View = class {
                 graph_node_count: nodes.length,
                 graph_skip: 0
             });
-            const viewGraph = new view.Graph(this, groups);
-            viewGraph.add(graph, signature);
+            const viewGraph = new view.Graph(this, groups, this._panelId);
+            viewGraph.add(graph, signature, nodeInfos);
             viewGraph.build(document);
             await viewGraph.measure();
             status = await viewGraph.layout(this._worker);
@@ -696,7 +1111,7 @@ view.View = class {
         const lastIndex = file.lastIndexOf('.');
         const extension = lastIndex === -1 ? 'png' : file.substring(lastIndex + 1).toLowerCase();
         if (this.activeTarget && (extension === 'png' || extension === 'svg')) {
-            const canvas = this._element('canvas');
+            const canvas = this._element(this._panelId + '-canvas');
             const clone = canvas.cloneNode(true);
             const document = this._host.document;
             const applyStyleSheet = (element, name) => {
@@ -728,7 +1143,7 @@ view.View = class {
             clone.style.removeProperty('width');
             clone.style.removeProperty('height');
             const background = clone.querySelector('#background');
-            clone.getElementById('edge-paths-hit-test').remove();
+            clone.getElementById(this._panelId + '-edge-paths-hit-test').remove();
             const origin = clone.querySelector('#origin');
             origin.setAttribute('transform', 'translate(0,0) scale(1)');
             background.removeAttribute('width');
@@ -761,6 +1176,7 @@ view.View = class {
                     image.onload = async () => {
                         try {
                             let targetWidth = Math.ceil(width * 2);
+                            const canvas = this._host.document.createElement(this._panelId + '-canvas');
                             let targetHeight = Math.ceil(height * 2);
                             let scale = 1;
                             if (targetWidth > 100000 || targetHeight > 100000) {
@@ -776,7 +1192,6 @@ view.View = class {
                             const drawScale = targetWidth / width;
                             const size = Math.min(targetWidth, 4096);
                             const encoder = new png.Encoder(window, targetWidth, targetHeight);
-                            const canvas = this._host.document.createElement('canvas');
                             canvas.width = size;
                             canvas.height = 4096;
                             const context = canvas.getContext('2d');
@@ -820,178 +1235,42 @@ view.View = class {
         }
     }
 
-    showModelProperties() {
-        if (!this._model) {
-            return;
-        }
-        try {
-            const sidebar = new view.ModelSidebar(this, this.model);
-            this._sidebar.open(sidebar, 'Model Properties');
-        } catch (error) {
-            this.error(error, 'Error showing model properties.', null);
-        }
+    isPanelEmpty() {
+        return this.target === null || this.target === undefined;
+    }
+
+    setupSidebarEventLisnteners(sidebar) {
+        sidebar.on('focus', (sender, value) => {
+            this._target.focus([value]);
+        });
+        sidebar.on('blur', (sender, value) => {
+            this._target.blur([value]);
+        });
+        sidebar.on('select', (sender, value) => {
+            this._target.scrollTo(this._target.select([value]));
+        });
+        sidebar.on('activate', (sender, value) => {
+            this._target.scrollTo(this._target.activate(value));
+        });
+        sidebar.on('deactivate', () => {
+            this._target.select(null);
+        });        
     }
 
     showTargetProperties() {
-        if (this._sidebar.identifier === 'target') {
-            this.showModelProperties();
-            return;
-        }
-        const target = this.activeTarget;
-        if (!target) {
-            return;
-        }
-        try {
-            const sidebar = new view.TargetSidebar(this, target, this.activeSignature);
-            sidebar.on('show-definition', async (/* sender, e */) => {
-                await this.showDefinition(target);
-            });
-            sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
-            });
-            sidebar.on('blur', (sender, value) => {
-                this._target.blur([value]);
-            });
-            sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value]));
-            });
-            sidebar.on('activate', (sender, value) => {
-                this._target.scrollTo(this._target.activate(value));
-            });
-            sidebar.on('deactivate', () => {
-                this._target.select(null);
-            });
-            let title = null;
-            const type = target.type || 'graph';
-            switch (type) {
-                case 'graph':
-                    title = 'Graph Properties';
-                    break;
-                case 'function':
-                    title = 'Function Properties';
-                    break;
-                case 'weights':
-                    title = 'Weights Properties';
-                    break;
-                default:
-                    throw new view.Error(`Unsupported graph type '${type}'.`);
-            }
-            this._sidebar.open(sidebar, title);
-        } catch (error) {
-            this.error(error, 'Error showing target properties.', null);
-        }
+        this._host._view.showTargetProperties();
     }
 
     showNodeProperties(node) {
-        if (node) {
-            try {
-                if (this._menu) {
-                    this._menu.close();
-                }
-                const sidebar = new view.NodeSidebar(this, node);
-                sidebar.on('show-definition', async (/* sender, e */) => {
-                    await this.showDefinition(node.type);
-                });
-                sidebar.on('focus', (sender, value) => {
-                    this._target.focus([value]);
-                });
-                sidebar.on('blur', (sender, value) => {
-                    this._target.blur([value]);
-                });
-                sidebar.on('select', (sender, value) => {
-                    this._target.scrollTo(this._target.select([value]));
-                });
-                sidebar.on('activate', (sender, value) => {
-                    this._target.scrollTo(this._target.activate(value));
-                });
-                this._sidebar.open(sidebar, 'Node Properties');
-            } catch (error) {
-                this.error(error, 'Error showing node properties.', null);
-            }
-        }
+        this._host._view.showNodeProperties(node, this._panelId);
     }
 
     showConnectionProperties(value, from, to) {
-        try {
-            if (this._menu) {
-                this._menu.close();
-            }
-            const sidebar = new view.ConnectionSidebar(this, value, from, to);
-            sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
-            });
-            sidebar.on('blur', (sender, value) => {
-                this._target.blur([value]);
-            });
-            sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value]));
-            });
-            sidebar.on('activate', (sender, value) => {
-                this._target.scrollTo(this._target.activate(value));
-            });
-            this._sidebar.push(sidebar, 'Connection Properties');
-        } catch (error) {
-            this.error(error, 'Error showing connection properties.', null);
-        }
+        this._host._view.showConnectionProperties(value, from, to, this._panelId);
     }
 
     showTensorProperties(value) {
-        try {
-            if (this._menu) {
-                this._menu.close();
-            }
-            const sidebar = new view.TensorSidebar(this, value);
-            sidebar.on('focus', (sender, value) => {
-                this._target.focus([value]);
-            });
-            sidebar.on('blur', () => {
-                this._target.blur(null);
-            });
-            sidebar.on('select', (sender, value) => {
-                this._target.scrollTo(this._target.select([value]));
-            });
-            sidebar.on('activate', (sender, value) => {
-                this._target.scrollTo(this._target.activate(value));
-            });
-            this._sidebar.push(sidebar, 'Tensor Properties');
-        } catch (error) {
-            this.error(error, 'Error showing tensor properties.', null);
-        }
-    }
-
-    exception(error, fatal) {
-        if (error && !error.context && this._model && this._model.identifier) {
-            error.context = this._model.identifier;
-        }
-        this._host.exception(error, fatal);
-    }
-
-    async showDefinition(type) {
-        if (type && (type.description || type.inputs || type.outputs || type.attributes)) {
-            if (type.nodes && type.nodes.length > 0) {
-                await this.pushTarget(type);
-            }
-            if (type.type !== 'weights') {
-                const sidebar = new view.DocumentationSidebar(this, type);
-                sidebar.on('navigate', (sender, e) => {
-                    this._host.openURL(e.link);
-                });
-                const title = type.type === 'function' ? 'Function Documentation' : 'Documentation';
-                this._sidebar.push(sidebar, title);
-            }
-        }
-    }
-
-    about() {
-        this._host.document.getElementById('version').innerText = this._host.version;
-        const handler = () => {
-            this._host.window.removeEventListener('keydown', handler);
-            this._host.document.body.removeEventListener('click', handler);
-            this._host.document.body.classList.remove('about');
-        };
-        this._host.window.addEventListener('keydown', handler);
-        this._host.document.body.addEventListener('click', handler);
-        this._host.document.body.classList.add('about');
+        this._host._view.showTensorProperties(value, this._panelId);
     }
 };
 
@@ -1581,9 +1860,9 @@ view.Worker = class {
 
 view.Graph = class extends grapher.Graph {
 
-    constructor(view, compound) {
-        super(compound);
-        this.view = view;
+    constructor(panel, compound, panelId) {
+        super(compound, panelId);
+        this.panel = panel;
         this.counter = 0;
         this._nodeKey = 0;
         this._values = new Map();
@@ -1591,6 +1870,7 @@ view.Graph = class extends grapher.Graph {
         this._table = new Map();
         this._selection = new Set();
         this._zoom = 1;
+        this._panelId = panelId;
         this._listeners = {};
     }
 
@@ -1614,23 +1894,23 @@ view.Graph = class extends grapher.Graph {
     }
 
     get model() {
-        return this.view.model;
+        return this.panel.model;
     }
 
     get host() {
-        return this.view.host;
+        return this.panel.host;
     }
 
     get options() {
-        return this.view.options;
+        return this.panel.options;
     }
 
     get selection() {
         return this._selection;
     }
 
-    createNode(node) {
-        const obj = new view.Node(this, node);
+    createNode(node, nodeInfo) {
+        const obj = new view.Node(this, node, null, nodeInfo);
         obj.name = (this._nodeKey++).toString();
         this._table.set(node, obj);
         return obj;
@@ -1643,8 +1923,8 @@ view.Graph = class extends grapher.Graph {
         return obj;
     }
 
-    createInput(input) {
-        const obj = new view.Input(this, input);
+    createInput(input, nodeInfo) {
+        const obj = new view.Input(this, input, nodeInfo);
         obj.name = (this._nodeKey++).toString();
         this._table.set(input, obj);
         return obj;
@@ -1683,7 +1963,7 @@ view.Graph = class extends grapher.Graph {
         return null;
     }
 
-    add(graph, signature) {
+    add(graph, signature, nodeInfos) {
         this.identifier = this.model.identifier;
         this.identifier += graph && graph.name ? `.${graph.name.replace(/\/|\\/g, '.')}` : '';
         const clusters = new Set();
@@ -1706,7 +1986,7 @@ view.Graph = class extends grapher.Graph {
         if (Array.isArray(inputs)) {
             for (const argument of inputs) {
                 if (argument.visible !== false) {
-                    const viewInput = this.createInput(argument);
+                    const viewInput = this.createInput(argument, nodeInfos.getNodeInfo(argument));
                     this.setNode(viewInput);
                     for (const value of argument.value) {
                         this.createValue(value).from = viewInput;
@@ -1715,7 +1995,7 @@ view.Graph = class extends grapher.Graph {
             }
         }
         for (const node of graph.nodes) {
-            const viewNode = this.createNode(node);
+            const viewNode = this.createNode(node, nodeInfos.getNodeInfo(node));
             this.setNode(viewNode);
             let outputs = node.outputs;
             if (node.chain && node.chain.length > 0) {
@@ -1789,12 +2069,18 @@ view.Graph = class extends grapher.Graph {
     }
 
     build(document) {
-        const element = document.getElementById('target');
+        const element = document.getElementById(this._panelId);
         while (element.lastChild) {
             element.removeChild(element.lastChild);
         }
         const canvas = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        canvas.setAttribute('id', 'canvas');
+        const background = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        const origin = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+
+        canvas.setAttribute('id', this._panelId + '-canvas');
+        origin.setAttribute('id', this._panelId + '-origin');
+        background.setAttribute('id', this._panelId + '-background');
+
         canvas.setAttribute('class', 'canvas');
         canvas.setAttribute('preserveAspectRatio', 'xMidYMid meet');
         canvas.setAttribute('width', '100%');
@@ -1802,13 +2088,9 @@ view.Graph = class extends grapher.Graph {
         element.appendChild(canvas);
         // Workaround for Safari background drag/zoom issue:
         // https://stackoverflow.com/questions/40887193/d3-js-zoom-is-not-working-with-mousewheel-in-safari
-        const background = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-        background.setAttribute('id', 'background');
         background.setAttribute('fill', 'none');
         background.setAttribute('pointer-events', 'all');
         canvas.appendChild(background);
-        const origin = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-        origin.setAttribute('id', 'origin');
         canvas.appendChild(origin);
         for (const value of this._values.values()) {
             value.build();
@@ -1889,9 +2171,11 @@ view.Graph = class extends grapher.Graph {
 
     restore(state) {
         const document = this.host.document;
-        const canvas = document.getElementById('canvas');
-        const origin = document.getElementById('origin');
-        const background = document.getElementById('background');
+
+        const canvas = document.getElementById(this._panelId + '-canvas');
+        const origin = document.getElementById(this._panelId + '-origin');
+        const background = document.getElementById(this._panelId + '-background');
+
         const elements = Array.from(canvas.getElementsByClassName('graph-input') || []);
         if (elements.length === 0) {
             const nodeElements = Array.from(canvas.getElementsByClassName('graph-node') || []);
@@ -1915,7 +2199,7 @@ view.Graph = class extends grapher.Graph {
         canvas.setAttribute('height', height);
         this._zoom = state ? state.zoom : 1;
         this._updateZoom(this._zoom);
-        const container = document.getElementById('target');
+        const container = document.getElementById(this._panelId);
         const context = state ? this.select([state.context]) : [];
         if (context.length > 0) {
             this.scrollTo(context, 'instant');
@@ -1958,7 +2242,7 @@ view.Graph = class extends grapher.Graph {
             this._events.pointerdown = (e) => this._pointerDownHandler(e);
             this._events.touchstart = (e) => this._touchStartHandler(e);
             const document = this.host.document;
-            const element = document.getElementById('target');
+            const element = document.getElementById(this._panelId);
             element.focus();
             element.addEventListener('scroll', this._events.scroll);
             element.addEventListener('wheel', this._events.wheel, { passive: false });
@@ -1974,7 +2258,7 @@ view.Graph = class extends grapher.Graph {
     unregister() {
         if (this._events) {
             const document = this.host.document;
-            const element = document.getElementById('target');
+            const element = document.getElementById(this._panelId);
             element.removeEventListener('scroll', this._events.scroll);
             element.removeEventListener('wheel', this._events.wheel);
             element.removeEventListener('pointerdown', this._events.pointerdown);
@@ -1994,9 +2278,11 @@ view.Graph = class extends grapher.Graph {
 
     _updateZoom(zoom, e) {
         const document = this.host.document;
-        const container = document.getElementById('target');
-        const canvas = document.getElementById('canvas');
-        const limit = this.view.options.direction === 'vertical' ?
+        const container = document.getElementById(this._panelId);
+
+        let canvas = document.getElementById(this._panelId + '-canvas');
+        
+        const limit = this.panel.options.direction === 'vertical' ?
             container.clientHeight / this._height :
             container.clientWidth / this._width;
         const min = Math.min(Math.max(limit, 0.15), 1);
@@ -2031,7 +2317,7 @@ view.Graph = class extends grapher.Graph {
             }
         }
         const document = this.host.document;
-        const container = document.getElementById('target');
+        const container = document.getElementById(this._panelId);
         e.target.setPointerCapture(e.pointerId);
         this._mousePosition = {
             left: container.scrollLeft,
@@ -2051,7 +2337,7 @@ view.Graph = class extends grapher.Graph {
                 this._mousePosition.moved = dx * dx + dy * dy > 0;
                 if (this._mousePosition.moved) {
                     const document = this.host.document;
-                    const container = document.getElementById('target');
+                    const container = document.getElementById(this._panelId);
                     container.scrollTop = this._mousePosition.top - dy;
                     container.scrollLeft = this._mousePosition.left - dx;
                 }
@@ -2103,7 +2389,7 @@ view.Graph = class extends grapher.Graph {
             }
         };
         const document = this.host.document;
-        const container = document.getElementById('target');
+        const container = document.getElementById(this._panelId);
         const touchEndHandler = () => {
             container.removeEventListener('touchmove', touchMoveHandler, { passive: true });
             container.removeEventListener('touchcancel', touchEndHandler, { passive: true });
@@ -2120,7 +2406,7 @@ view.Graph = class extends grapher.Graph {
         e.preventDefault();
         this._gestureZoom = this._zoom;
         const document = this.host.document;
-        const container = document.getElementById('target');
+        const container = document.getElementById(this._panelId);
         const gestureChangeHandler = (e) => {
             e.preventDefault();
             this._updateZoom(this._gestureZoom * e.scale, e);
@@ -2148,7 +2434,7 @@ view.Graph = class extends grapher.Graph {
     }
 
     _wheelHandler(e) {
-        if (e.shiftKey || e.ctrlKey || this.view.options.mousewheel === 'zoom') {
+        if (e.shiftKey || e.ctrlKey || this.panel.options.mousewheel === 'zoom') {
             let factor = 1;
             if (e.deltaMode === 1) {
                 factor = 0.05;
@@ -2166,7 +2452,7 @@ view.Graph = class extends grapher.Graph {
     scrollTo(selection, behavior) {
         if (selection && selection.length > 0) {
             const document = this.host.document;
-            const container = document.getElementById('target');
+            const container = document.getElementById(this._panelId);
             const rect = container.getBoundingClientRect();
             // Exclude scrollbars
             const cw = container.clientWidth;
@@ -2241,12 +2527,12 @@ view.Graph = class extends grapher.Graph {
 
 view.Node = class extends grapher.Node {
 
-    constructor(context, value, type) {
+    constructor(context, value, type, nodeInfo) {
         super();
         this.context = context;
         this.value = value;
         this.id = `node-${value.name ? `name-${value.name}` : `id-${(context.counter++)}`}`;
-        this._add(value, type);
+        this._add(value, type, nodeInfo);
         const inputs = value.inputs;
         if (type !== 'graph' && Array.isArray(inputs)) {
             for (const argument of inputs) {
@@ -2287,10 +2573,10 @@ view.Node = class extends grapher.Node {
         return this.value.outputs;
     }
 
-    _add(value, type) {
+    _add(value, type, nodeInfo) {
         const node = type === 'graph' ? { type: value } : value;
         const options = this.context.options;
-        const header =  this.header();
+        const header =  this.header(nodeInfo);
         const category = node.type && node.type.category ? node.type.category : '';
         if (node.type && typeof node.type.name !== 'string' || !node.type.name.split) { // #416
             const error = new view.Error(`Unsupported node type '${JSON.stringify(node.type.name)}'.`);
@@ -2450,7 +2736,7 @@ view.Node = class extends grapher.Node {
 
     toggle() {
         this._expand.content = '-';
-        this.context.view.target = new view.Graph(this.context.view, false);
+        this.context.view.target = new view.Graph(this.context.view, false, panelId);
         this.context.view.target.add(this.value);
         // const document = this.element.ownerDocument;
         // const parent = this.element.parentElement;
@@ -2463,7 +2749,7 @@ view.Node = class extends grapher.Node {
     }
 
     activate() {
-        this.context.view.showNodeProperties(this.value);
+        this.context.panel.showNodeProperties(this.value);
     }
 
     edge(to) {
@@ -2477,8 +2763,8 @@ view.Node = class extends grapher.Node {
 
 view.Input = class extends grapher.Node {
 
-    constructor(context, value) {
-        super();
+    constructor(context, value, nodeInfo) {
+        super(nodeInfo);
         this.context = context;
         this.value = value;
         view.Input.counter = view.Input.counter || 0;
@@ -2487,9 +2773,9 @@ view.Input = class extends grapher.Node {
         if (name.length > 16) {
             name = name.split('/').pop();
         }
-        const header = this.header();
+        const header = this.header(nodeInfo);
         const title = header.add(null, ['graph-item-input'], name, types);
-        title.on('click', () => this.context.view.showTargetProperties());
+        title.on('click', () => this.context.panel.showTargetProperties());
         this.id = `input-${name ? `name-${name}` : `id-${(view.Input.counter++)}`}`;
     }
 
@@ -2506,7 +2792,7 @@ view.Input = class extends grapher.Node {
     }
 
     activate() {
-        this.context.view.showTargetProperties();
+        this.context.panel.showTargetProperties();
     }
 
     edge(to) {
@@ -2532,7 +2818,7 @@ view.Output = class extends grapher.Node {
             }
             const header = this.header();
             const title = header.add(null, ['graph-item-output'], name, types);
-            title.on('click', () => this.context.view.showTargetProperties());
+            title.on('click', () => this.context.panel.showTargetProperties());
         }
     }
 
@@ -2545,7 +2831,7 @@ view.Output = class extends grapher.Node {
     }
 
     activate() {
-        this.context.view.showTargetProperties();
+        this.context.panel.showTargetProperties();
     }
 };
 
@@ -2621,9 +2907,9 @@ view.Value = class {
         if (this.value && this.from && Array.isArray(this.to) && !this.value.initializer) {
             const from = this.from.value;
             const to = this.to.map((node) => node.value);
-            this.context.view.showConnectionProperties(this.value, from, to);
+            this.context.panel.showConnectionProperties(this.value, from, to);
         } else if (this.value && this.value.initializer) {
-            this.context.view.showTensorProperties({ value: [this.value] });
+            this.context.panel.showTensorProperties({ value: [this.value] });
         }
     }
 };
@@ -2660,7 +2946,7 @@ view.Argument = class extends grapher.Argument {
     }
 
     activate() {
-        this.context.view.showTensorProperties(this.value);
+        this.context.panel.showTensorProperties(this.value);
     }
 };
 
@@ -2965,8 +3251,9 @@ view.TargetSelector = class extends view.Control {
         }
         section('Modules', modules);
         section('Signatures', signatures);
-        section('Functions', functions);
-        const visible = functions.length > 0 || signatures.length > 0 || modules.length > 1;
+        section('Functions', functions);    
+        // const visible = functions.length > 0 || signatures.length > 0 || modules.length > 1;
+        const visible = false;
         this._element.style.display = visible ? 'inline' : 'none';
     }
 };
@@ -3011,7 +3298,7 @@ view.ObjectSidebar = class extends view.Control {
         value.on('select', (sender, value) => this.emit('select', value));
         value.on('activate', (sender, value) => this.emit('activate', value));
         value.on('deactivate', (sender, value) => this.emit('deactivate', value));
-        this.addEntry(name, value);
+        this.addEntry(name, value, value);
         return value;
     }
 
@@ -3029,9 +3316,10 @@ view.ObjectSidebar = class extends view.Control {
 
 view.NodeSidebar = class extends view.ObjectSidebar {
 
-    constructor(context, node) {
+    constructor(context, node, model) {
         super(context);
         this._node = node;
+        this._model = model;
     }
 
     get identifier() {
@@ -3101,6 +3389,7 @@ view.NodeSidebar = class extends view.ObjectSidebar {
                 this.addArgument(name, output);
             }
         }
+        const metadata = this._model.attachment.metadata.node(node);
         const blocks = node.blocks;
         if (Array.isArray(blocks) && blocks.length > 0) {
             this.addSection('Blocks');
@@ -3109,14 +3398,13 @@ view.NodeSidebar = class extends view.ObjectSidebar {
                 this.addArgument(name, block);
             }
         }
-        const metadata = this._view.model.attachment.metadata.node(node);
         if (Array.isArray(metadata) && metadata.length > 0) {
             this.addSection('Metadata');
             for (const argument of metadata) {
                 this.addArgument(argument.name, argument, 'attribute');
             }
         }
-        const metrics = this._view.model.attachment.metrics.node(node);
+        const metrics = this._model.attachment.metrics.node(node);
         if (Array.isArray(metrics) && metrics.length > 0) {
             this.addSection('Metrics');
             for (const argument of metrics) {
@@ -3243,55 +3531,63 @@ view.ArgumentView = class extends view.Control {
         this._source = source;
         this._elements = [];
         this._items = [];
-        const type = argument.type === 'attribute' ? null : argument.type;
-        let value = argument.value;
-        if (argument.type === 'attribute') {
-            this._source = 'attribute';
-        }
-        if (argument.type === 'tensor' || argument.type === 'tensor?') {
-            if (value === null || (value && value.constructor && value.constructor.name === 'Value')) {
-                value = [value];
-            } else {
-                value = [{ type: value.type, initializer: value }];
-            }
-        } else if (argument.type === 'tensor[]' || argument.type === 'tensor?[]') {
-            value = value.map((value) => {
-                if (value === null || (value && value.constructor && value.constructor.name === 'Value')) {
-                    return value;
-                }
-                return { type: value.type, initializer: value };
-            });
-        }
-        this._source = typeof type === 'string' && !type.endsWith('*') ? 'attribute' : this._source;
-        const primitive = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint';
-        if (primitive) {
-            const item = new view.PrimitiveView(context, argument);
-            this._items.push(item);
-        } else if (this._source === 'attribute' && type !== 'tensor' && type !== 'tensor?' && type !== 'tensor[]' && type !== 'tensor?[]') {
-            this._source = 'attribute';
-            const item = new view.PrimitiveView(context, argument);
-            this._items.push(item);
-        } else if (Array.isArray(value) && value.length === 0) {
+
+        // Empty argument
+        if( argument === null || argument === undefined ) {
             const item = new view.TextView(this._view, null);
             this._items.push(item);
-        } else {
-            const values = value;
-            for (const value of values) {
-                const emit = values.length === 1 && value && value.initializer;
-                const target = emit ? argument : value;
-                if (value === null) {
-                    const item = new view.TextView(this._view, null);
-                    this._items.push(item);
+        }
+        else {
+            const type = argument.type === 'attribute' ? null : argument.type;
+            let value = argument.value;
+            if (argument.type === 'attribute') {
+                this._source = 'attribute';
+            }
+            if (argument.type === 'tensor' || argument.type === 'tensor?') {
+                if (value === null || (value && value.constructor && value.constructor.name === 'Value')) {
+                    value = [value];
                 } else {
-                    const item = new view.ValueView(context, value, this._source);
-                    item.on('focus', () => this.emit('focus', target));
-                    item.on('blur', () => this.emit('blur', target));
-                    item.on('activate', () => this.emit('activate', target));
-                    item.on('select', () => this.emit('select', target));
-                    this._items.push(item);
+                    value = [{ type: value.type, initializer: value }];
+                }
+            } else if (argument.type === 'tensor[]' || argument.type === 'tensor?[]') {
+                value = value.map((value) => {
+                    if (value === null || (value && value.constructor && value.constructor.name === 'Value')) {
+                        return value;
+                    }
+                    return { type: value.type, initializer: value };
+                });
+            }
+            this._source = typeof type === 'string' && !type.endsWith('*') ? 'attribute' : this._source;
+            const primitive = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint';
+            if (primitive) {
+                const item = new view.PrimitiveView(context, argument);
+                this._items.push(item);
+            } else if (this._source === 'attribute' && type !== 'tensor' && type !== 'tensor?' && type !== 'tensor[]' && type !== 'tensor?[]') {
+                const item = new view.PrimitiveView(context, argument);
+                this._items.push(item);
+            } else if (Array.isArray(value) && value.length === 0) {
+                const item = new view.TextView(this._view, null);
+                this._items.push(item);
+            } else {
+                const values = Array.isArray(value) ? value : [value];
+                for (const value of values) {
+                    const emit = values.length === 1 && value && value.initializer;
+                    const target = emit ? argument : value;
+                    if (value === null) {
+                        const item = new view.TextView(this._view, null);
+                        this._items.push(item);
+                    } else {
+                        const item = new view.ValueView(context, value, this._source);
+                        item.on('focus', () => this.emit('focus', target));
+                        item.on('blur', () => this.emit('blur', target));
+                        item.on('activate', () => this.emit('activate', target));
+                        item.on('select', () => this.emit('select', target));
+                        this._items.push(item);
+                    }
                 }
             }
         }
+
         for (const item of this._items) {
             this._elements.push(...item.render());
         }
@@ -3769,11 +4065,12 @@ view.NodeListView = class extends view.Control {
 
 view.ConnectionSidebar = class extends view.ObjectSidebar {
 
-    constructor(context, value, from, to) {
+    constructor(context, value, from, to, model) {
         super(context);
         this._value = value;
         this._from = from;
         this._to = to;
+        this._model = model;
     }
 
     get identifier() {
@@ -3799,14 +4096,14 @@ view.ConnectionSidebar = class extends view.ObjectSidebar {
             this.addSection('Outputs');
             this.addNodeList('to', to);
         }
-        const metadata = this._view.model.attachment.metadata.value(value);
+        const metadata = this._model.attachment.metadata.value(value);
         if (Array.isArray(metadata) && metadata.length > 0) {
             this.addSection('Metadata');
             for (const argument of metadata) {
                 this.addArgument(argument.name, argument, 'attribute');
             }
         }
-        const metrics = this._view.model.attachment.metrics.value(value);
+        const metrics = this._model.attachment.metrics.value(value);
         if (Array.isArray(metrics) && metrics.length > 0) {
             this.addSection('Metrics');
             for (const argument of metrics) {
@@ -3849,9 +4146,10 @@ view.ConnectionSidebar = class extends view.ObjectSidebar {
 
 view.TensorSidebar = class extends view.ObjectSidebar {
 
-    constructor(context, value) {
+    constructor(context, value, model) {
         super(context);
         this._value = value;
+        this._model = model;
     }
 
     get identifier() {
@@ -3901,6 +4199,7 @@ view.TensorSidebar = class extends view.ObjectSidebar {
             }
             const value = new view.TensorView(this._view, tensor, this._tensor);
             this.addEntry('value', value);
+            const metadata = this._model.attachment.metadata.tensor(tensor);
             const attributes = tensor.attributes;
             if (Array.isArray(attributes) && attributes.length > 0) {
                 this.addSection('Attributes');
@@ -3908,7 +4207,6 @@ view.TensorSidebar = class extends view.ObjectSidebar {
                     this.addArgument(attribute.name, attribute, 'attribute');
                 }
             }
-            const metadata = this._view.model.attachment.metadata.tensor(tensor);
             if (Array.isArray(metadata) && metadata.length > 0) {
                 this.addSection('Metadata');
                 for (const argument of metadata) {
@@ -3925,7 +4223,7 @@ view.TensorSidebar = class extends view.ObjectSidebar {
                 if (!this._tensor.empty) {
                     if (!this._metrics) {
                         const tensor = new metrics.Tensor(this._tensor);
-                        this._metrics = this._view.model.attachment.metrics.tensor(tensor);
+                        this._metrics = this._model.attachment.metrics.tensor(tensor);
                     }
                     if (this._metrics.length > 0) {
                         this.addSection('Metrics');
@@ -3948,6 +4246,7 @@ view.TensorSidebar = class extends view.ObjectSidebar {
         this.emit('select', null);
     }
 };
+
 
 view.ModelSidebar = class extends view.ObjectSidebar {
 
@@ -3989,7 +4288,7 @@ view.ModelSidebar = class extends view.ObjectSidebar {
         if (model.source) {
             this.addProperty('source', model.source);
         }
-        const metadata = this._view.model.attachment.metadata.model(model);
+        const metadata = this._model.attachment.metadata.model(model);
         if (Array.isArray(metadata) && metadata.length > 0) {
             this.addSection('Metadata');
             for (const argument of metadata) {
@@ -4007,16 +4306,17 @@ view.ModelSidebar = class extends view.ObjectSidebar {
 
     get metrics() {
         const model = new metrics.Model(this._model);
-        return this._view.model.attachment.metrics.model(model);
+        return this._model.attachment.metrics.model(model);
     }
 };
 
 view.TargetSidebar = class extends view.ObjectSidebar {
 
-    constructor(context, target, signature) {
+    constructor(context, target, signature, model) {
         super(context);
         this._target = target;
         this._signature = signature;
+        this._model = model;
     }
 
     render() {
@@ -4060,7 +4360,7 @@ view.TargetSidebar = class extends view.ObjectSidebar {
                 this.addArgument(output.name, output);
             }
         }
-        const metadata = this._view.model.attachment.metadata.graph(target);
+        const metadata = this._model.attachment.metadata.graph(target);
         if (Array.isArray(metadata) && metadata.length > 0) {
             this.addSection('Metadata');
             for (const argument of metadata) {
@@ -4078,7 +4378,7 @@ view.TargetSidebar = class extends view.ObjectSidebar {
 
     get metrics() {
         const target = new metrics.Target(this._target);
-        return this._view.model.attachment.metrics.graph(target);
+        return this._model.attachment.metrics.graph(target);
     }
 
     get identifier() {
@@ -4523,6 +4823,258 @@ view.FindSidebar = class extends view.Control {
         const message = this.createTextNode(` ${error.message}`);
         element.appendChild(message);
         this._content.appendChild(element);
+    }
+};
+
+view.DoubleFindSidebar = class extends view.FindSidebar {
+
+    constructor(context, state, graph1, signature1, graph2, signature2, nodeInfos1 = null, nodeInfos2 = null) {
+        super(context, state, graph1, signature1);
+        this._graph2 = graph2;
+        this._signature2 = signature2;
+        this._nodeInfos1 = nodeInfos1;
+        this._nodeInfos2 = nodeInfos2;
+        this._state.modelA = this._state.modelA !== false;
+        this._state.modelB = this._state.modelB !== false;
+        this._modelToggles = {
+            modelA: { hide: 'Hide Model A', show: 'Show Model A' },
+            modelB: { hide: 'Hide Model B', show: 'Show Model B' }
+        };
+    }
+
+    // Override: _edges keyed by "panelIdx:name" to avoid cross-model dedup
+    _edge(value, panelIdx) {
+        const key = `${panelIdx}:${value.name}`;
+        if (value.name && !this._edges.has(key) && this._value(value)) {
+            const content = value.name.split('\n').shift();
+            this._add(value, content, 'connection', panelIdx);
+            this._edges.add(key);
+        }
+    }
+
+    // Override: wrap value with panelIdx; prefix content with model label;
+    // attach grapher-compatible highlight/sync listeners for matched nodes.
+    _add(value, content, type, panelIdx) {
+        if (!this._toggles[type].template) {
+            const element = this.createElement('li');
+            element.innerHTML = `<svg class='sidebar-find-content-icon'><use href="#sidebar-icon-${type}"></use></svg>`;
+            this._toggles[type].template = element;
+        }
+        const element = this._toggles[type].template.cloneNode(true);
+        const label = panelIdx === 0 ? 'A' : 'B';
+        const text = this._host.document.createTextNode(`${label}: ${content}`);
+        element.appendChild(text);
+        element.setAttribute('data-model', label);
+        this._table.set(element, { panelIdx, value });
+
+        if (type === 'node') {
+            const nodeInfos = panelIdx === 0 ? this._nodeInfos1 : this._nodeInfos2;
+            const nodeId = nodeInfos?.getNodeInfo?.(value)?.nodeID;
+            if (nodeId !== null && nodeId !== undefined) {
+                const nodeIdStr = String(nodeId);
+                const NODE_MATCH_CLASS = 'node-match-highlight';
+                const findMatches = (id) => document.querySelectorAll(`[data-node-id='${CSS.escape(id)}']`);
+                element.dataset.nodeId = nodeIdStr;
+                element.addEventListener('mouseenter', () =>
+                    findMatches(nodeIdStr).forEach((el) => el.classList.add(NODE_MATCH_CLASS)));
+                element.addEventListener('mouseleave', () =>
+                    findMatches(nodeIdStr).forEach((el) => el.classList.remove(NODE_MATCH_CLASS)));
+                element.addEventListener('click', () => {
+                    const getPanel = (el) => el?.closest?.('.panel') || null;
+                    const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+                    const masterPanel = getPanel(element);
+
+                    if (!masterPanel) {
+                        // Sidebar click: the 'select' event (from the ol listener) scrolls the
+                        // clicked node's panel. Scroll ALL other panels to their matched nodes.
+                        const graphMatches = Array.from(findMatches(nodeIdStr)).filter((el) => getPanel(el));
+                        for (const node of graphMatches) {
+                            const panel = getPanel(node);
+                            const nodeRect  = node.getBoundingClientRect();
+                            const panelRect = panel.getBoundingClientRect();
+                            panel.scrollTo({
+                                top:      Math.max(0, panel.scrollTop  + (nodeRect.top  - panelRect.top)  - panelRect.height / 2),
+                                left:     Math.max(0, panel.scrollLeft + (nodeRect.left - panelRect.left) - panelRect.width  / 2),
+                                behavior: prefersReducedMotion ? 'auto' : 'smooth'
+                            });
+                        }
+                        return;
+                    }
+
+                    // Graph node click: same master/slave sync as grapher
+                    const matchedNodes = Array.from(findMatches(nodeIdStr));
+                    if (matchedNodes.length < 2) return;
+                    let masterNode, slaveNode;
+                    if (masterPanel === getPanel(matchedNodes[0])) {
+                        masterNode = matchedNodes[0]; slaveNode = matchedNodes[1];
+                    } else {
+                        masterNode = matchedNodes[1]; slaveNode = matchedNodes[0];
+                    }
+                    const slavePanel = getPanel(slaveNode);
+                    if (!slavePanel) return;
+                    const masterNodeRect  = masterNode.getBoundingClientRect();
+                    const slaveNodeRect   = slaveNode.getBoundingClientRect();
+                    const masterPanelRect = masterPanel.getBoundingClientRect();
+                    const slavePanelRect  = slavePanel.getBoundingClientRect();
+                    const deltaY = (slaveNodeRect.top  - slavePanelRect.top)  - (masterNodeRect.top  - masterPanelRect.top);
+                    const deltaX = (slaveNodeRect.left - slavePanelRect.left) - (masterNodeRect.left - masterPanelRect.left);
+                    slavePanel.scrollTo({
+                        top:      Math.max(0, slavePanel.scrollTop  + deltaY),
+                        left:     Math.max(0, slavePanel.scrollLeft + deltaX),
+                        behavior: prefersReducedMotion ? 'auto' : 'smooth'
+                    });
+                });
+            }
+        }
+
+        this._content.appendChild(element);
+    }
+
+    // Override: include panelIdx in emitted event
+    _focus(element) {
+        if (this._table.has(element)) {
+            this.emit('focus', this._table.get(element));
+            this._focused.add(element);
+        }
+    }
+
+    _blur(element) {
+        if (this._table.has(element)) {
+            this.emit('blur', this._table.get(element));
+            this._focused.delete(element);
+        }
+    }
+
+    // Override: search a single graph and emit panelIdx-tagged results
+    _searchGraph(graph, signature, panelIdx) {
+        const inputs = signature ? signature.inputs : graph.inputs;
+        if (this._state.connection) {
+            for (const input of inputs) {
+                for (const value of input.value) {
+                    this._edge(value, panelIdx);
+                }
+            }
+        }
+        for (const node of graph.nodes) {
+            this._nodeForPanel(node, panelIdx);
+        }
+        if (this._state.connection) {
+            const outputs = signature ? signature.outputs : graph.outputs;
+            for (const output of outputs) {
+                if (!output.type || output.type.endsWith('*')) {
+                    for (const value of output.value) {
+                        this._edge(value, panelIdx);
+                    }
+                }
+            }
+        }
+    }
+
+    // Renamed from _node to avoid collision with parent; same logic but panelIdx-aware
+    _nodeForPanel(node, panelIdx) {
+        if (this._state.connection) {
+            const inputs = node.inputs;
+            if (Array.isArray(inputs)) {
+                for (const input of inputs) {
+                    if (!input.type || input.type.endsWith('*')) {
+                        for (const value of input.value) {
+                            if (value !== null && !value.initializer) {
+                                this._edge(value, panelIdx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (this._state.node) {
+            const name = node.name;
+            const type = node.type.name;
+            const identifier = node.identifier;
+            if ((name && this._term(name)) || (type && this._term(type)) || (identifier && this._term(identifier))) {
+                this._add(node, `${name || `[${type}]`}`, 'node', panelIdx);
+            }
+        }
+        if (this._state.weight) {
+            const inputs = node.inputs;
+            if (Array.isArray(inputs)) {
+                for (const argument of inputs) {
+                    if (!argument.type || argument.type.endsWith('*')) {
+                        for (const value of argument.value) {
+                            if (value !== null && value.initializer && this._value(value)) {
+                                let content = null;
+                                if (value.name) {
+                                    content = value.name.split('\n').shift();
+                                } else if (Array.isArray(argument.value) && argument.value.length === 1 && argument.name.indexOf('.') !== -1) {
+                                    content = argument.name;
+                                } else if (value.type && value.type.shape && Array.isArray(value.type.shape.dimensions) && value.type.shape.dimensions.length > 0) {
+                                    content = value.type.shape.dimensions.map((d) => (d !== null && d !== undefined) ? d : '?').join('\u00D7');
+                                }
+                                if (content) {
+                                    const target = argument.value.length === 1 ? argument : node;
+                                    this._add(target, content, 'weight', panelIdx);
+                                }
+                            }
+                        }
+                    } else if (argument.type === 'object') {
+                        this._nodeForPanel(argument.value, panelIdx);
+                    } else if (argument.type === 'object[]') {
+                        for (const value of argument.value) {
+                            this._nodeForPanel(value, panelIdx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Override: iterate both graphs with model visibility guards
+    _update() {
+        try {
+            this._reset();
+            if (this._state.modelA && this._target) {
+                this._searchGraph(this._target, this._signature, 0);
+            }
+            if (this._state.modelB && this._graph2) {
+                this._searchGraph(this._graph2, this._signature2, 1);
+            }
+        } catch (error) {
+            this.error(error, false);
+        }
+    }
+
+    // Override: add model A/B toggles after the base render
+    render() {
+        super.render();
+        for (const [name, toggle] of Object.entries(this._modelToggles)) {
+            const label = name === 'modelA' ? 'A' : 'B';
+            toggle.element = this.createElement('label', 'sidebar-find-toggle');
+            const span = this.createElement('span', 'sidebar-find-model-label');
+            span.textContent = label;
+            toggle.element.appendChild(span);
+            toggle.element.setAttribute('title', this._state[name] ? toggle.hide : toggle.show);
+            toggle.checkbox = this.createElement('input');
+            toggle.checkbox.setAttribute('type', 'checkbox');
+            toggle.checkbox.setAttribute('data', name);
+            toggle.checkbox.addEventListener('change', (e) => {
+                const n = e.target.getAttribute('data');
+                this._state[n] = e.target.checked;
+                const t = this._modelToggles[n];
+                t.element.setAttribute('title', e.target.checked ? t.hide : t.show);
+                this.emit('state-changed', this._state);
+                this._update();
+            });
+            toggle.element.insertBefore(toggle.checkbox, toggle.element.firstChild);
+            this._search.appendChild(toggle.element);
+        }
+    }
+
+    // Override: also init model A/B checkboxes
+    activate() {
+        super.activate();
+        for (const [name, toggle] of Object.entries(this._modelToggles)) {
+            toggle.checkbox.checked = this._state[name];
+            toggle.element.setAttribute('title', this._state[name] ? toggle.hide : toggle.show);
+        }
     }
 };
 
@@ -5716,265 +6268,6 @@ png.Encoder = class {
         // IEND
         buffer.set([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82], 45 + compressed.length);
         return buffer;
-    }
-};
-
-metadata.Attachment = class {
-
-    constructor() {
-        this.metadata = new metadata.Attachment.Container('metadata');
-        this.metrics = new metadata.Attachment.Container('metrics');
-    }
-
-    async open(context) {
-        context = new view.Context(context);
-        if (context.identifier.toLowerCase().endsWith('.json')) {
-            const data = await context.peek('json');
-            if (data && data.signature === 'netron:attachment') {
-                const containers = [this.metadata, this.metrics];
-                for (const container of containers) {
-                    container.open(data[container.name]);
-                }
-                return true;
-            }
-        }
-        return false;
-    }
-
-};
-
-metadata.Attachment.Container = class {
-
-    constructor(name) {
-        this._name = name;
-        this._entries = new Map();
-    }
-
-    get name() {
-        return this._name;
-    }
-
-    open(data) {
-        this._entries.clear();
-        if (Array.isArray(data)) {
-            for (const item of data) {
-                if (item.kind && ('target' in item || 'identifier' in item)) {
-                    const key = 'target' in item ? `${item.kind}::${item.target}` : `${item.kind}[${item.identifier}]`;
-                    if (!this._entries.has(key)) {
-                        this._entries.set(key, new Map());
-                    }
-                    const entries = this._entries.get(key);
-                    entries.set(item.name, { value: item.value, type: item.type });
-                }
-            }
-        }
-    }
-
-    model(value) {
-        return this._list(value, 'model');
-    }
-
-    graph(value) {
-        return this._list(value, 'graph');
-    }
-
-    node(value) {
-        return this._list(value, 'node');
-    }
-
-    value(value) {
-        return this._list(value, 'value');
-    }
-
-    tensor(value) {
-        return this._list(value, 'tensor');
-    }
-
-    _list(value, kind) {
-        const category = this._name;
-        const entries = value[category] || [];
-        const result = new Map(entries.map((entry) => [entry.name, entry]));
-        if (value.name || kind === 'model' || kind === 'graph') {
-            const key = `${kind}::${(value.name || '').split('\n').shift()}`;
-            if (this._entries.has(key)) {
-                for (const [name, entry] of this._entries.get(key)) {
-                    const argument = new metadata.Argument(name, entry.value, entry.type || 'attribute');
-                    result.set(name, argument);
-                }
-            }
-        }
-        if (value.identifier) {
-            const key = `${kind}[${value.identifier}]`;
-            if (this._entries.has(key)) {
-                for (const [name, entry] of this._entries.get(key)) {
-                    const argument = new metadata.Argument(name, entry.value, entry.type || 'attribute');
-                    result.set(name, argument);
-                }
-            }
-        }
-        return Array.from(result.values());
-    }
-};
-
-metadata.Argument = class {
-
-    constructor(name, value, type = null) {
-        this.name = name;
-        this.value = value;
-        this.type = type;
-    }
-};
-
-metrics.Model = class {
-
-    constructor(model) {
-        this._model = model;
-        this._metrics = null;
-    }
-
-    get metrics() {
-        if (this._metrics === null) {
-            this._metrics = [];
-            this._metrics = Array.from(this._model.metrics || []);
-            const keys = new Set(this._metrics.map((metric) => metric.name));
-            if (!keys.has('parameters')) {
-                let parameters = 0;
-                for (const graph of this._model.graphs || []) {
-                    const map = new Map((new metrics.Target(graph).metrics || []).map((metric) => [metric.name, metric]));
-                    parameters = map.has('parameters') ? parameters + map.get('parameters').value : NaN;
-                }
-                for (const func of this._model.functions || []) {
-                    const map = new Map((new metrics.Target(func).metrics || []).map((metric) => [metric.name, metric]));
-                    parameters = map.has('parameters') ? parameters + map.get('parameters').value : NaN;
-                }
-                if (!Number.isNaN(parameters) && parameters > 0) {
-                    this._metrics.push(new metadata.Argument('parameters', parameters, 'attribute'));
-                }
-            }
-        }
-        return this._metrics;
-    }
-};
-
-metrics.Target = class {
-
-    constructor(target) {
-        this._target = target;
-        this._metrics = null;
-    }
-
-    get metrics() {
-        if (this._metrics === null) {
-            this._metrics = [];
-            this._metrics = Array.from(this._target.metrics || []);
-            const keys = new Set(this._metrics.map((metrics) => metrics.name));
-            if (!keys.has('parameters')) {
-                let parameters = 0;
-                const initializers = new Set();
-                if (this._target && Array.isArray(this._target.nodes)) {
-                    for (const node of this._target.nodes) {
-                        for (const argument of node.inputs || []) {
-                            if (argument && Array.isArray(argument.value)) {
-                                for (const value of argument.value) {
-                                    if (value && value.initializer) {
-                                        initializers.add(value.initializer);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                for (const tensor of initializers) {
-                    const shape = tensor && tensor.type && tensor.type.shape && Array.isArray(tensor.type.shape.dimensions) ? tensor.type.shape.dimensions : [];
-                    if (!shape.every((dim) => typeof dim === 'number')) {
-                        parameters = 0;
-                        break;
-                    }
-                    parameters += shape.reduce((a, b) => a * b, 1);
-                }
-                if (parameters > 0) {
-                    this._metrics.push(new metadata.Argument('parameters', parameters, 'attribute'));
-                }
-            }
-        }
-        return this._metrics;
-    }
-};
-
-metrics.Tensor = class {
-
-    constructor(tensor) {
-        this._tensor = tensor;
-        this._metrics = null;
-    }
-
-    get name() {
-        return this._tensor.name || '';
-    }
-
-    get metrics() {
-        if (this._metrics === null) {
-            this._metrics = [];
-            this._metrics = Array.from(this._tensor.metrics || []);
-            const keys = new Set(this._metrics.map((metrics) => metrics.name));
-            const type = this._tensor.type;
-            const shape = type.shape.dimensions;
-            const size = shape.reduce((a, b) => a * b, 1);
-            if (size < 0x800000 &&
-                (type.dataType.startsWith('float') || type.dataType.startsWith('bfloat')) &&
-                (!keys.has('sparsity') || !keys.has('min') || !keys.has('max') && !keys.has('mean') || !keys.has('max') || !keys.has('std'))) {
-                const data = this._tensor.value;
-                let zeros = 0;
-                let min = null;
-                let max = null;
-                let sum = 0;
-                let count = 0;
-                const stack = [data];
-                while (stack.length > 0) {
-                    const data = stack.pop();
-                    if (Array.isArray(data)) {
-                        for (const element of data) {
-                            stack.push(element);
-                        }
-                    } else {
-                        zeros += data === 0 || data === 0n || data === '';
-                        min = Math.min(data, min === null ? data : min);
-                        max = Math.max(data, max === null ? data : max);
-                        sum += data;
-                        count += 1;
-                    }
-                }
-                const mean = sum / count;
-                if (!keys.has('sparsity')) {
-                    this._metrics.push(new metadata.Argument('min', min, type.dataType));
-                }
-                if (!keys.has('max')) {
-                    this._metrics.push(new metadata.Argument('max', max, type.dataType));
-                }
-                if (!keys.has('mean')) {
-                    this._metrics.push(new metadata.Argument('mean', mean, type.dataType));
-                }
-                if (!keys.has('std')) {
-                    let variance = 0;
-                    const stack = [data];
-                    while (stack.length > 0) {
-                        const data = stack.pop();
-                        if (Array.isArray(data)) {
-                            for (const element of data) {
-                                stack.push(element);
-                            }
-                        } else {
-                            variance += Math.pow(data - mean, 2);
-                        }
-                    }
-                    this._metrics.push(new metadata.Argument('std', Math.sqrt(variance / count)));
-                }
-                if (!keys.has('sparsity')) {
-                    this._metrics.push(new metadata.Argument('sparsity', count > 0 ? zeros / count : 0, 'percentage'));
-                }
-            }
-        }
-        return this._metrics;
     }
 };
 
@@ -7280,8 +7573,345 @@ if (typeof window !== 'undefined' && window.exports) {
     window.exports.view = view;
 }
 
+
+const SidebarSectionType = {
+    PROPERTY: "property",
+    ARGUMENT: "argument"
+};
+
+
+doubleSidebar.DoubleNameValueView = class extends view.Control {
+
+    constructor(context, name, value1, value2) {
+        super(context);
+        this._name = name;
+        this._value1 = value1;
+        this._value2 = value2;
+        const nameElement = this.createElement('div', 'sidebar-item-name');
+        const input = this.createElement('input');
+        input.setAttribute('type', 'text');
+        input.setAttribute('value', name);
+        input.setAttribute('title', name);
+        input.setAttribute('readonly', 'true');
+        nameElement.appendChild(input);
+        const valueElement1 = this.createElement('div', 'sidebar-item-value-list-left');
+        for (const element of value1.render()) {
+            valueElement1.appendChild(element);
+        }
+        const valueElement2 = this.createElement('div', 'sidebar-item-value-list-right');
+        for (const element of value2.render()) {
+            valueElement2.appendChild(element);
+        }
+        this.element = this.createElement('div', 'sidebar-item');
+        this.element.appendChild(nameElement);
+        const valuesContainer = this.createElement('div', 'sidebar-item-values-container');
+        valuesContainer.appendChild(valueElement1);
+        valuesContainer.appendChild(valueElement2);
+        this.element.appendChild(valuesContainer);
+    }
+
+    get name() {
+        return this._name;
+    }
+
+    render() {
+        return this.element;
+    }
+
+    toggle() {
+        this._value1.toggle();
+        this._value2.toggle();
+    }
+};
+
+
+doubleSidebar.DoubleObjectSidebar = class extends view.ObjectSidebar {
+
+    constructor(context, diffInfos) {
+        super(context);
+        this._diffInfos = diffInfos;
+    }
+
+    _getClassStyle(status) {
+        if (status === diffAnalyzer.DiffStatus.ADDED) {
+            return ['sidebar-item-added', 'sidebar-item-removed'];
+        }
+        else if (status === diffAnalyzer.DiffStatus.REMOVED) {
+            return ['sidebar-item-removed', 'sidebar-item-added'];
+        }
+        else if (status === diffAnalyzer.DiffStatus.SAME) {
+            return [null, null];
+        }
+        else {
+            return ['sidebar-item-different', 'sidebar-item-different'];
+        }
+    }
+
+    addEntry(name, item1, item2) {
+        const entry = new doubleSidebar.DoubleNameValueView(this._view, name, item1, item2);
+        const element = entry.render();
+        this.element.appendChild(element);
+    }
+
+    addProperty(name, value1, value2, style, status) {
+        let item1 = new view.TextView(this._view, value1, style);
+        let item2 = new view.TextView(this._view, value2, style);
+        
+        const [diffStyle1, diffStyle2] = this._getClassStyle(status);
+        item1.element.classList.add(diffStyle1);
+        item2.element.classList.add(diffStyle2);
+        this.addEntry(name, item1, item2);
+        return item1; // TODO: Both items?
+    }
+
+    addArgument(name, argument1, argument2, source, status) {
+        const value1 = new view.ArgumentView(this._view, argument1, source);
+        const value2 = new view.ArgumentView(this._view, argument2, source);
+
+        const [diffStyle1, diffStyle2] = this._getClassStyle(status);
+        for (const element of value1._elements) {
+            element.classList.add(diffStyle1);
+        }
+        for (const element of value2._elements) {
+            element.classList.add(diffStyle2);
+        }
+
+        for (const value of [value1, value2]) {
+            value.on('focus', (sender, value) => { 
+                this.emit('focus', value);
+                this._focused = this._focused || new Set();
+                this._focused.add(value);
+            });
+            value.on('blur', (sender, value) => {
+                this.emit('blur', value);
+                this._focused = this._focused || new Set();
+                this._focused.delete(value);
+            });
+            value.on('select', (sender, value) => this.emit('select', value));
+            value.on('activate', (sender, value) => this.emit('activate', value));
+            value.on('deactivate', (sender, value) => this.emit('deactivate', value));
+        }
+
+        this.addEntry(name, value1, value2);
+        return [value1, value2];
+    }
+
+    render() {
+        if( this._diffInfos.propertyDiffs.length !== 0) {
+            for(const propertyDiff of this._diffInfos.propertyDiffs) {
+                this.addProperty(propertyDiff.name, propertyDiff.value1, propertyDiff.value2, null, propertyDiff.propertyStatus.generalStatus);
+            }
+        }
+        
+        if( this._diffInfos.attributeDiffs.length !== 0) {
+            this.addSection('Attributes');
+            const sortedAttributes = this._diffInfos.attributeDiffs.sort((a, b) => a.name.localeCompare(b.name));
+            for(const attributeDiff of sortedAttributes) {
+                this.addArgument(attributeDiff.name, attributeDiff.value1, attributeDiff.value2, 'attribute', attributeDiff.propertyStatus.generalStatus);
+            }
+        }
+
+        if( this._diffInfos.inputDiffs.length !== 0) {
+            this.addSection('Inputs');
+            for(const inputDiff of this._diffInfos.inputDiffs) {
+                // If tensor status is known use it
+                let status = inputDiff.propertyStatus.generalStatus;
+
+                if (status === diffAnalyzer.DiffStatus.SAME 
+                    && inputDiff.propertyStatus.tensorValueStatus === diffAnalyzer.DiffStatus.DIFF ) {
+                    status = diffAnalyzer.DiffStatus.DIFF;
+                }
+
+                this.addArgument(inputDiff.name, inputDiff.value1, inputDiff.value2, null, status);
+            }
+        }
+
+        if( this._diffInfos.outputDiffs.length !== 0) {
+            this.addSection('Outputs');
+            for(const outputDiff of this._diffInfos.outputDiffs) {
+                this.addArgument(outputDiff.name, outputDiff.value1, outputDiff.value2, null, outputDiff.propertyStatus.generalStatus);
+            }
+        }
+
+        if( this._diffInfos.metadataDiffs.length !== 0) {
+            this.addSection('Metadata');
+            for(const metadataDiff of this._diffInfos.metadataDiffs) {
+                this.addArgument(metadataDiff.name, metadataDiff.value1, metadataDiff.value2, 'attribute', metadataDiff.propertyStatus.generalStatus);
+            }
+        }
+
+        if( this._diffInfos.metricDiffs.length !== 0) {
+            this.addSection('Metrics');
+            for(const metricDiff of this._diffInfos.metricDiffs) {
+                this.addArgument(metricDiff.name, metricDiff.value1, metricDiff.value2, 'attribute', metricDiff.propertyStatus.generalStatus);
+            }
+        }
+    }
+}
+
+
+doubleSidebar.DoubleModelSidebar = class extends doubleSidebar.DoubleObjectSidebar {
+
+    constructor(context, model1, model2) {
+        const modelDiffs = diffAnalyzer.ModelDiffAnalyzer.compare(model1, model2, model1, model2);
+        super(context, modelDiffs);
+    }
+
+    get identifier() {
+        return 'model';
+    }
+};
+
+
+doubleSidebar.DoubleTargetSidebar = class extends doubleSidebar.DoubleObjectSidebar {
+
+    constructor(context, target1, signature1, target2, signature2, model1, model2) {
+        const targetDiffs = diffAnalyzer.GraphDiffAnalyzer.compare(
+            [target1, signature1], 
+            [target2, signature2],
+            model1, model2);
+        super(context, targetDiffs);
+    }
+
+    get identifier() {
+        return 'target';
+    }
+};
+
+
+doubleSidebar.DoubleNodeSidebar = class extends doubleSidebar.DoubleObjectSidebar {
+
+    constructor(context, nodeInfos) {
+        super(context, nodeInfos);
+    }
+
+    get identifier() {
+        return 'node';
+    }
+};
+
+
+/**
+ * Sync scroll between two panels by matched-node alignment.
+ * Finds the topmost visible matched node in the source panel (identified by [data-node-id])
+ * and scrolls the target so its counterpart sits at the same panel-relative vertical offset.
+ * Matched nodes share the same data-node-id value across both panels.
+ * Falls back to proportional sync when no matched node is visible.
+ *
+ * @param {Object} options
+ * @param {HTMLElement} options.panelA
+ * @param {HTMLElement} options.panelB
+ */
+function createScrollSync({ panelA, panelB }) {
+    if (!panelA || !panelB) {
+        throw new Error("createScrollSync: panelA and panelB are required.");
+    }
+
+    // Panels being programmatically scrolled — their scroll events are suppressed.
+    const animating = new Set();
+    let animTimerA = 0, animTimerB = 0;
+    let rafIdA = 0, rafIdB = 0;
+
+    function doScroll(targetPanel, next) {
+        const maxScroll = Math.max(0, targetPanel.scrollHeight - targetPanel.clientHeight);
+        next = Math.max(0, Math.min(next, maxScroll));
+        if (Math.abs(next - targetPanel.scrollTop) < 0.5) return;
+        animating.add(targetPanel);
+        if (targetPanel === panelA) {
+            clearTimeout(animTimerA);
+            animTimerA = setTimeout(() => animating.delete(panelA), 100);
+        } else {
+            clearTimeout(animTimerB);
+            animTimerB = setTimeout(() => animating.delete(panelB), 100);
+        }
+        targetPanel.scrollTo({ top: next, behavior: 'auto' });
+    }
+
+    // Track the pair of nodes currently highlighted as the sync anchor.
+    const SYNC_HALO = 'node-sync-halo';
+    let haloAnchor = null;
+    let haloMatch  = null;
+
+    function setHalo(anchor, match) {
+        if (haloAnchor) haloAnchor.classList.remove(SYNC_HALO);
+        if (haloMatch)  haloMatch.classList.remove(SYNC_HALO);
+        haloAnchor = anchor ?? null;
+        haloMatch  = match  ?? null;
+        if (haloAnchor) haloAnchor.classList.add(SYNC_HALO);
+        if (haloMatch)  haloMatch.classList.add(SYNC_HALO);
+    }
+
+    // Return the topmost partially-visible [data-node-id] element in panel.
+    function findAnchor(panel) {
+        const panelRect = panel.getBoundingClientRect();
+        let anchor = null;
+        let bestDist = Infinity;
+        for (const el of panel.querySelectorAll('[data-node-id]')) {
+            const rect = el.getBoundingClientRect();
+            if (rect.bottom < panelRect.top || rect.top > panelRect.bottom) continue;
+            const dist = Math.max(0, rect.top - panelRect.top);
+            if (dist < bestDist) { bestDist = dist; anchor = el; }
+        }
+        return anchor;
+    }
+
+    function alignedSync(sourcePanel, targetPanel) {
+        const anchor = findAnchor(sourcePanel);
+        if (anchor) {
+            const nodeId = anchor.getAttribute('data-node-id');
+            const matchEl = targetPanel.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`);
+            if (matchEl) {
+                // Scroll target so matchEl appears at the same offset from the panel top as anchor.
+                const anchorRelTop = anchor.getBoundingClientRect().top
+                    - sourcePanel.getBoundingClientRect().top;
+                const matchAbsTop = matchEl.getBoundingClientRect().top
+                    - targetPanel.getBoundingClientRect().top
+                    + targetPanel.scrollTop;
+                doScroll(targetPanel, matchAbsTop - anchorRelTop);
+                setHalo(anchor, matchEl);
+                return;
+            }
+        }
+        // Fallback: proportional sync — no specific node pair to highlight.
+        setHalo(null, null);
+        const maxSrc = Math.max(1, sourcePanel.scrollHeight - sourcePanel.clientHeight);
+        const maxTgt = Math.max(0, targetPanel.scrollHeight - targetPanel.clientHeight);
+        doScroll(targetPanel, (sourcePanel.scrollTop / maxSrc) * maxTgt);
+    }
+
+    function listenerA() {
+        if (animating.has(panelA)) return;
+        cancelAnimationFrame(rafIdA);
+        rafIdA = requestAnimationFrame(() => alignedSync(panelA, panelB));
+    }
+
+    function listenerB() {
+        if (animating.has(panelB)) return;
+        cancelAnimationFrame(rafIdB);
+        rafIdB = requestAnimationFrame(() => alignedSync(panelB, panelA));
+    }
+
+    panelA.addEventListener('scroll', listenerA, { passive: true });
+    panelB.addEventListener('scroll', listenerB, { passive: true });
+
+    return {
+        destroy() {
+            setHalo(null, null);
+            panelA.removeEventListener('scroll', listenerA);
+            panelB.removeEventListener('scroll', listenerB);
+            cancelAnimationFrame(rafIdA);
+            cancelAnimationFrame(rafIdB);
+            clearTimeout(animTimerA);
+            clearTimeout(animTimerB);
+            animating.clear();
+        }
+    };
+}
+
+
 export const View = view.View;
 export const ModelFactoryService = view.ModelFactoryService;
+export const ObjectSidebar = view.ObjectSidebar;
 export const ModelSidebar = view.ModelSidebar;
 export const NodeSidebar = view.NodeSidebar;
 export const TensorSidebar = view.TensorSidebar;

@@ -2753,3 +2753,5 @@ pytorch.Error = class extends Error {
 
 export const Metadata = pytorch.Metadata;
 export const ModelFactory = pytorch.ModelFactory;
+export const Node = pytorch.Node;
+export const Tensor = pytorch.Tensor;

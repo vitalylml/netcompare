@@ -1,5 +1,5 @@
-
 import * as base from './base.js';
+import * as diffAnalyzer from './diff-analyzer.js';
 
 const browser = {};
 
@@ -28,12 +28,13 @@ browser.Host = class {
             packaged: this._meta.version && this._meta.version[0] !== '0.0.0',
             platform: /(Mac|iPhone|iPod|iPad)/i.test(this._navigator.platform) ? 'darwin' : undefined,
             agent: this._navigator.userAgent.toLowerCase().indexOf('safari') !== -1 && this._navigator.userAgent.toLowerCase().indexOf('chrome') === -1 ? 'safari' : '',
-            repository: this._element('logo-github').getAttribute('href'),
+            repository: this._element('github-ref').getAttribute('href'),
             menu: true
         };
         if (this.version && !/^\d+\.\d+\.\d+$/.test(this.version)) {
             throw new Error('Invalid version.');
         }
+        this._modelPaths = { input1: null, input2: null };
     }
 
     get window() {
@@ -181,42 +182,117 @@ browser.Host = class {
             this._openGist(gist);
             return;
         }
-        const openFileButton = this._element('open-file-button');
-        const openFileDialog = this._element('open-file-dialog');
-        if (openFileButton && openFileDialog) {
-            openFileButton.addEventListener('click', () => {
-                this.execute('open');
-            });
-            const mobileSafari = this.environment('platform') === 'darwin' && window.navigator.maxTouchPoints && window.navigator.maxTouchPoints > 1;
+        
+        const mobileSafari = this.environment('platform') === 'darwin' && window.navigator.maxTouchPoints && window.navigator.maxTouchPoints > 1;
+
+        const modelInput1 = document.getElementById('model-file-1');
+        if (modelInput1) {
             if (!mobileSafari) {
                 const extensions = new base.Metadata().extensions.map((extension) => `.${extension}`);
-                openFileDialog.setAttribute('accept', extensions.join(', '));
+                modelInput1.setAttribute('accept', extensions.join(', '));
             }
-            openFileDialog.addEventListener('change', (e) => {
-                if (e.target && e.target.files && e.target.files.length > 0) {
-                    const files = Array.from(e.target.files);
+            modelInput1.addEventListener('change', (event) => {
+                if (event.target && event.target.files && event.target.files.length > 0) {
+                    const files = Array.from(event.target.files);
                     const file = files.find((file) => this._view.accept(file.name, file.size));
+                    const labelText = document.getElementById('label-text-model-file-1');
                     if (file) {
-                        this._open(file, files);
+                        this._modelPaths.input1 = {main_file: file, support_files: files};
+                        labelText.textContent = file.name;
+                    }
+                    else {
+                        labelText.textContent = 'Select Model A';    
                     }
                 }
             });
         }
+
+
+        const modelInput2 = document.getElementById('model-file-2');
+        if (modelInput2) {
+            if (!mobileSafari) {
+                const extensions = new base.Metadata().extensions.map((extension) => `.${extension}`);
+                modelInput2.setAttribute('accept', extensions.join(', '));
+            }
+            modelInput2.addEventListener('change', (event) => {
+                if (event.target && event.target.files && event.target.files.length > 0) {
+                    const files = Array.from(event.target.files);
+                    const file = files.find((file) => this._view.accept(file.name, file.size));
+                    const labelText = document.getElementById('label-text-model-file-2');
+                    if (file) {
+                        this._modelPaths.input2 = {main_file: file, support_files: files};
+                        labelText.textContent = file.name;
+                    }
+                    else {
+                        labelText.textContent = 'Select Model B';
+                    }
+                }
+            });
+        }
+    
+        document.getElementById('compare-models-button').addEventListener('click', async (event) => {
+            if (this._modelPaths.input1 || this._modelPaths.input2) {
+                this._view.show('welcome spinner');
+                let model1 = null;
+                let model2 = null;
+                
+                if (this._modelPaths.input1) {
+                    const model1Paths = this._modelPaths.input1;
+                    model1 = await this._open(model1Paths, 'model-left');
+                }
+                if (this._modelPaths.input2) {
+                    const model2Paths = this._modelPaths.input2;
+                    model2 = await this._open(model2Paths, 'model-right');
+                }
+                let differences = null;
+                try {
+                    differences = diffAnalyzer.SoftModelNodesDiffAnalyzer.compare(model1, model2);
+                } catch (error) {
+                    differences = new diffAnalyzer.ModelDifferences([])
+                }
+
+                this._view.setDifferences(differences);
+
+                await this._renderPanels(model1, model2, differences);
+                
+                this._view.enableScrollSync();
+                this._view.show(null)
+            } else {
+                console.log('At least one model file must be selected for comparison.');
+            }                        
+        });
+
+        // Drag-and-drop handlers for each file input
+        function setupDragAndDrop(labelId, inputId) {
+            const label = document.getElementById(labelId);
+            const input = document.getElementById(inputId);
+            label.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                label.classList.add('drag-over');
+            });
+            label.addEventListener('dragleave', (e) => {
+                e.preventDefault();
+                label.classList.remove('drag-over');
+            });
+            label.addEventListener('drop', (e) => {
+                e.preventDefault();
+                label.classList.remove('drag-over');
+                if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    input.files = e.dataTransfer.files;
+                    input.dispatchEvent(new Event('change'));
+                }
+            });
+        }
+
+        setupDragAndDrop('label-text-model-file-1', 'model-file-1');
+        setupDragAndDrop('label-text-model-file-2', 'model-file-2');
+
+        // Prevent default drag/drop on document
         document.addEventListener('dragover', (e) => {
             e.preventDefault();
         });
         document.addEventListener('drop', (e) => {
             e.preventDefault();
-        });
-        document.body.addEventListener('drop', (e) => {
-            e.preventDefault();
-            if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                const files = Array.from(e.dataTransfer.files);
-                const file = files.find((file) => this._view.accept(file.name, file.size));
-                if (file) {
-                    this._open(file, files);
-                }
-            }
         });
         this._view.show('welcome');
     }
@@ -253,8 +329,16 @@ browser.Host = class {
 
     async execute(name /*, value */) {
         switch (name) {
-            case 'open': {
-                const openFileDialog = this._element('open-file-dialog');
+            case 'open-open-model-1': {
+                const openFileDialog = this._element('model-file-1');
+                if (openFileDialog) {
+                    openFileDialog.value = '';
+                    openFileDialog.click();
+                }
+                break;
+            }
+            case 'open-open-model-2': {
+                const openFileDialog = this._element('model-file-2');
                 if (openFileDialog) {
                     openFileDialog.value = '';
                     openFileDialog.click();
@@ -455,15 +539,52 @@ browser.Host = class {
         return await this._openContext(context);
     }
 
-    async _open(file, files) {
-        this._view.show('welcome spinner');
-        const context = new browser.BrowserFileContext(this, file, files);
-        try {
-            await context.open();
-            await this._openContext(context);
+    async _open(model, modelId) { 
+        const modelContext = new browser.BrowserFileContext(
+            this,
+            model.main_file,
+            model.support_files || [] );
+        try{
+            await modelContext.open();
+            return await this._openContext(modelContext, modelId);
         } catch (error) {
             await this._view.error(error);
         }
+    }
+
+    async _render(newModel, targetModelPanel, nodeInfos) {
+        const renderModel = await this._view.render(newModel, targetModelPanel, nodeInfos);
+        if (renderModel) {
+            return renderModel.name || renderModel.identifier;
+        }
+        else {
+            return ""; // 'model-render-failed';
+        }
+    }
+
+    async _renderPanels(model1, model2, differences)
+    {
+        let title1 = "";
+        let title2 = "";
+        if (model1 !== null) {
+            title1 = await this._render(model1, 'model-left', differences.model1NodeInfos);
+        }
+
+        if (model2 !== null) {
+            title2 = await this._render(model2, 'model-right', differences.model2NodeInfos);
+        }
+
+        if (title1 && title2) {
+            this.document.title = `${title1} vs ${title2}`;
+        } 
+        else if (title1 || title2) {
+            this.document.title = title1 || title2;
+        }
+        else {
+            this.document.title = '';
+        }
+
+        this._view.updatePanelVisibility();
     }
 
     async _openGist(gist) {
@@ -497,23 +618,27 @@ browser.Host = class {
         }
     }
 
-    async _openContext(context) {
-        const document = this.document;
+    _timeout(delay) {
+        return new Promise((resolve) => {
+            setTimeout(resolve, delay);
+        });
+    }
+
+    async _openContext(context, targetModelPanel) {
         this._telemetry.set('session_engaged', 1);
         try {
-            const attachment = await this._view.attach(context);
+            const attachment = await this._view.attach(context, targetModelPanel);
             if (attachment) {
-                this._view.show(null);
                 return 'context-open-attachment';
             }
-            const model = await this._view.open(context);
+            const model = await this._view.open(context, targetModelPanel);
             if (model) {
-                this._view.show(null);
-                document.title = context.name || context.identifier;
-                return '';
+                return model;
             }
-            document.title = '';
-            return 'context-open-failed';
+            else {
+                this.document.title = '';
+                return 'context-open-failed';
+            }
         } catch (error) {
             await this._view.error(error, error.name);
             return 'context-open-error';

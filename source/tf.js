@@ -2218,3 +2218,4 @@ tf.Error = class extends Error {
 };
 
 export const ModelFactory = tf.ModelFactory;
+export const Node = tf.Node;
