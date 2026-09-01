@@ -263,20 +263,20 @@ browser.Host = class {
         });
 
         // Drag-and-drop handlers for each file input
-        function setupDragAndDrop(labelId, inputId) {
-            const label = document.getElementById(labelId);
+        function setupDragAndDrop(inputId) {
+            const button = document.querySelector(`label[for="${inputId}"]`);
             const input = document.getElementById(inputId);
-            label.addEventListener('dragover', (e) => {
+            button.addEventListener('dragover', (e) => {
                 e.preventDefault();
-                label.classList.add('drag-over');
+                button.classList.add('drag-over');
             });
-            label.addEventListener('dragleave', (e) => {
+            button.addEventListener('dragleave', (e) => {
                 e.preventDefault();
-                label.classList.remove('drag-over');
+                button.classList.remove('drag-over');
             });
-            label.addEventListener('drop', (e) => {
+            button.addEventListener('drop', (e) => {
                 e.preventDefault();
-                label.classList.remove('drag-over');
+                button.classList.remove('drag-over');
                 if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                     input.files = e.dataTransfer.files;
                     input.dispatchEvent(new Event('change'));
@@ -284,8 +284,8 @@ browser.Host = class {
             });
         }
 
-        setupDragAndDrop('label-text-model-file-1', 'model-file-1');
-        setupDragAndDrop('label-text-model-file-2', 'model-file-2');
+        setupDragAndDrop('model-file-1');
+        setupDragAndDrop('model-file-2');
 
         // Prevent default drag/drop on document
         document.addEventListener('dragover', (e) => {
